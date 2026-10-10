@@ -356,6 +356,7 @@
       await window.Reports.pdfToday({
         data: todayData(), mode: 'day', title: 'Daily Class Entry Report', label: S.dateLabel + (sections().length > 1 ? ' · all sections' : ''),
         school: S.cfg.school || '', user: S.user ? S.user.name : '', file: 'ClassEntry_Daily_' + S.date + '.pdf',
+        footer: S.cfg.reportFooter, generatedBy: S.cfg.reportBy,
       });
       toast('PDF saved to your downloads ✓');
     } catch (e) { toast('Could not create the PDF: ' + (e && e.message ? e.message : 'unknown error') + '. It needs the app to have been opened online once.'); }
@@ -804,5 +805,7 @@
     }
   }
 
-  init();
+  const hideBoot = function () { const b = document.getElementById('boot'); if (b) { b.classList.add('done'); setTimeout(function () { b.remove(); }, 450); } };
+  setTimeout(hideBoot, 8000);   // never leave the loading screen up if something goes wrong
+  init().then(hideBoot, hideBoot);
 })();

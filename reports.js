@@ -98,6 +98,10 @@
         return '<option value="' + esc(x) + '"' + (x === R.section ? ' selected' : '') + '>' + esc(x) + '</option>';
       }).join('') + '</select></div>';
     }
+    if (R.mode === 'week') {
+      h += '<div class="rnav"><button class="arrow" style="width:auto;padding:0 12px;font-size:.9rem" data-jump="0">This week</button>' +
+        '<button class="arrow" style="width:auto;padding:0 12px;font-size:.9rem" data-jump="-1">Last week</button>' + weekPicker() + '</div>';
+    }
     h += '<div class="rtools"><button id="rReload">↻ Refresh</button><button id="rExport" class="exp"' + (R.data ? '' : ' disabled') + '>Export · PDF / CSV</button></div>';
 
     if (R.mode === 'term' && !terms().length) {
@@ -106,6 +110,20 @@
     else if (R.err) h += '<div class="rmsg"><div class="err">' + esc(R.err) + '</div><p><button id="rReload2" class="xbtn" style="text-align:center">Try again</button></p></div>';
     else if (R.data) h += body(R.data);
     host.innerHTML = h;
+  }
+
+  // Weeks of the term that contains the chosen date, as "Week 5 · 10-16 Oct" (newest first).
+  function weekPicker() {
+    const ts = terms(), cur = mondayOf(R.anchor);
+    let t = ts.find(function (x) { return x.start <= R.anchor && R.anchor <= x.end; });
+    if (!t && ts.length) t = ts.filter(function (x) { return x.start <= R.anchor; }).pop() || ts[0];
+    if (!t) return '';
+    const first = mondayOf(t.start), opts = [];
+    for (let w = first, n = 1; w <= t.end && n <= 30; w = addDays(w, 7), n++) {
+      const e = addDays(w, 6);
+      opts.push('<option value="' + w + '"' + (w === cur ? ' selected' : '') + '>Week ' + n + ' · ' + nice(w).replace(/^\w+ /, '') + ' - ' + nice(e).replace(/^\w+ /, '') + '</option>');
+    }
+    return '<select id="rWeek">' + opts.reverse().join('') + '</select>';
   }
 
   function body(d) {
@@ -267,6 +285,9 @@
     if (!(g.jspdf && g.jspdf.jsPDF.API.autoTable)) await loadScript('lib/jspdf.plugin.autotable.min.js');
     if (!g.PdfReport) await loadScript('pdf-report.js');
     opts.logo = await loadLogo();
+    const cfg = A().S.cfg || {};
+    if (opts.footer === undefined) opts.footer = cfg.reportFooter;
+    if (opts.generatedBy === undefined) opts.generatedBy = cfg.reportBy;
     return g.PdfReport.build(opts);
   }
 
@@ -318,6 +339,8 @@
         R.anchor = R.mode === 'day' ? addDays(R.anchor, n) : R.mode === 'week' ? addDays(R.anchor, 7 * n) : addMonths(R.anchor, n);
         load(false); return;
       }
+      const jump = t.closest('[data-jump]');
+      if (jump) { R.anchor = addDays(mondayOf(A().S.date), 7 * Number(jump.dataset.jump)); load(false); return; }
       const sub = t.closest('[data-sub]'); if (sub) { R.sub = sub.dataset.sub; draw(); return; }
       const tile = t.closest('[data-r]'); if (tile) { showKind(tile.dataset.r); return; }
       const row = t.closest('tr.go'); if (row) { showTeacher(row.dataset.t); return; }
@@ -326,6 +349,7 @@
     });
     host.addEventListener('change', function (e) {
       if (e.target.id === 'rTerm') { R.termIdx = Number(e.target.value); load(false); }
+      if (e.target.id === 'rWeek') { R.anchor = e.target.value; load(false); }
       if (e.target.id === 'rSec') { R.section = e.target.value; load(false); }
     });
   }
