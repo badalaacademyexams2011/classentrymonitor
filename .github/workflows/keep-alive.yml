@@ -1,0 +1,14 @@
+name: Monthly Account Keep-Alive
+
+on:
+  schedule:
+    # Runs at 00:00 on the 1st of every month
+    - cron: '0 0 1 * *'
+  workflow_dispatch: # Allows you to run this manually anytime for testing
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping repository
+        run: echo "Repository pinged successfully on $(date). Account status active."
