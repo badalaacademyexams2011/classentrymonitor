@@ -1,0 +1,251 @@
+/* Builds the formatted PDF report. Requires jsPDF (window.jspdf) and the autoTable plugin. */
+(function (g) {
+  'use strict';
+
+  const GREEN = [27, 110, 74], DARK = [32, 32, 32], GREY = [110, 110, 110], LIGHT = [243, 246, 243],
+        LINE = [210, 214, 210], AMBER = [217, 142, 0], RED = [198, 40, 40], WHITE = [255, 255, 255];
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const ordFull = function (n) { const v = n % 100; return v >= 11 && v <= 13 ? n + 'th period' : n + (({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th') + ' period'; };
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  // Standard PDF fonts only cover Latin-1, so strip anything outside it.
+  const clean = function (s) { return String(s == null ? '' : s).replace(/[\u2013\u2014]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[^\x20-\xFF]/g, ''); };
+  const pct = function (p) { return p == null ? '-' : (Math.round(p * 10) / 10).toFixed(1) + '%'; };
+  const tone = function (p, th) { return p == null ? GREY : p >= th.good ? GREEN : p >= th.warn ? AMBER : RED; };
+  const tint = function (c, a) { return c.map(function (v) { return Math.round(v + (255 - v) * a); }); };
+  const parse = function (s) { const p = s.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2], 12)); };
+  const nice = function (s) { const d = parse(s); return DAYS[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()]; };
+  const short = function (s) { const d = parse(s); return d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()]; };
+
+  function make(o) {
+    const jsPDF = g.jspdf.jsPDF;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+    const W = 210, H = 297, M = 14, d = o.data, th = d.thresholds, T = d.totals;
+    const school = clean(o.school), title = clean(o.title), label = clean(o.label);
+
+    const text = function (s, x, y, opt) { doc.text(clean(s), x, y, opt); };
+    const color = function (c) { doc.setTextColor(c[0], c[1], c[2]); };
+    const fill = function (c) { doc.setFillColor(c[0], c[1], c[2]); };
+    const stroke = function (c) { doc.setDrawColor(c[0], c[1], c[2]); };
+    const ensure = function (y, need) { if (y + need > H - 18) { doc.addPage(); return 20; } return y; };
+
+    /* ── page header ── */
+    fill(GREEN); doc.rect(0, 0, W, 4, 'F');
+    let tx = M;
+    if (o.logo && o.logo.dataUrl) {
+      const h = 20, w = Math.min(26, h * (o.logo.w / o.logo.h || 1));
+      try { doc.addImage(o.logo.dataUrl, /^data:image\/jpe?g/i.test(o.logo.dataUrl) ? 'JPEG' : 'PNG', M, 9, w, h); tx = M + w + 5; } catch (e) { /* skip logo */ }
+    }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(16); color(GREEN); text(school || 'School', tx, 16);
+    doc.setFontSize(11.5); color(DARK); text(title, tx, 23);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); color(GREY); text(label, tx, 29);
+    const gen = new Date();
+    text('Generated ' + gen.getDate() + ' ' + MONTHS[gen.getMonth()] + ' ' + gen.getFullYear(), W - M, 16, { align: 'right' });
+    if (o.user) text('Prepared by ' + o.user, W - M, 21, { align: 'right' });
+    stroke(LINE); doc.setLineWidth(0.3); doc.line(M, 34, W - M, 34);
+    let y = 40;
+
+    /* ── KPI strip ── */
+    const kp = [
+      ['Lessons observed', String(T.observed), T.days + ' day' + (T.days === 1 ? '' : 's') + ' recorded', GREEN],
+      ['On time', pct(T.pct), T.ot + ' of ' + T.observed, tone(T.pct, th)],
+      ['Late', String(T.late), T.minsLate + ' min in total', AMBER],
+      ['Absent', String(T.abs), 'periods missed', RED],
+      ['Time lost', String(T.timeLost), 'minutes of teaching', DARK],
+    ];
+    const gap = 3, bw = (W - 2 * M - 4 * gap) / 5;
+    kp.forEach(function (k, i) {
+      const x = M + i * (bw + gap);
+      fill(LIGHT); doc.roundedRect(x, y, bw, 22, 2, 2, 'F');
+      fill(k[3]); doc.rect(x, y + 3, 1.2, 16, 'F');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(16); color(k[3]); text(k[1], x + 5, y + 11);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); color(DARK); text(k[0], x + 5, y + 16);
+      doc.setFontSize(6.5); color(GREY); text(k[2], x + 5, y + 19.5);
+    });
+    y += 28;
+
+    /* ── highlights ── */
+    const pts = [];
+    pts.push(T.observed ? pct(T.pct) + ' of ' + T.observed + ' observed lessons began on time.' : 'No lessons were recorded in this period.');
+    const best = function (arr, key, tie) { return arr.slice().sort(function (a, b) { return (b[key] - a[key]) || (b[tie] - a[tie]); })[0]; };
+    const tl = best(d.byTeacher.filter(function (t) { return t.late > 0; }), 'late', 'minsLate');
+    if (tl) pts.push('Most late arrivals: ' + tl.name + ' - ' + tl.late + ' time' + (tl.late === 1 ? '' : 's') + ', ' + tl.minsLate + ' min in total.');
+    const ta = best(d.byTeacher.filter(function (t) { return t.abs > 0; }), 'abs', 'late');
+    if (ta) pts.push('Most absences: ' + ta.name + ' - ' + ta.abs + ' lesson' + (ta.abs === 1 ? '' : 's') + ' missed.');
+    const cs = d.byClass.map(function (c) { return Object.assign({ bad: c.late + c.abs }, c); }).sort(function (a, b) { return b.bad - a.bad; })[0];
+    if (cs && cs.bad > 0) pts.push('Class most affected: ' + cs.cls + ' (' + cs.late + ' late, ' + cs.abs + ' absent).');
+    const ps = d.byPeriod.map(function (p) { return Object.assign({ bad: p.late + p.abs }, p); }).sort(function (a, b) { return b.bad - a.bad; })[0];
+    if (ps && ps.bad > 0) pts.push('Period most affected: ' + ordFull(ps.period) + ' (' + ps.late + ' late, ' + ps.abs + ' absent).');
+    const perfect = d.byTeacher.filter(function (t) { return t.observed > 0 && t.pct === 100; }).length;
+    if (perfect) pts.push(perfect + ' teacher' + (perfect === 1 ? ' was' : 's were') + ' on time for every lesson observed.');
+    if (T.excused) pts.push(T.excused + ' late arrival' + (T.excused === 1 ? ' was' : 's were') + ' excused: the teacher was still in a lesson in another section (counted as on time).');
+    if (T.covers) pts.push(T.covers + ' lesson' + (T.covers === 1 ? ' was' : 's were') + ' covered by another teacher.');
+    if (!tl && !ta && T.observed) pts.push('No late or absent teachers were recorded.');
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); color(GREEN); text('Highlights', M, y); y += 5;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); color(DARK);
+    pts.slice(0, 7).forEach(function (p) {
+      const lines = doc.splitTextToSize(clean(p), W - 2 * M - 6);
+      fill(GREEN); doc.circle(M + 1.2, y - 1, 0.7, 'F');
+      doc.text(lines, M + 5, y); y += lines.length * 4.2 + 1;
+    });
+    y += 3;
+
+    /* ── trend chart (bars = % on time) ── */
+    const ser = o.mode === 'week' ? d.byDay.map(function (x) { return { l: nice(x.date).replace(/ \w+$/, ''), p: x.pct }; })
+      : (o.mode === 'month' || o.mode === 'term') ? d.byWeek.map(function (x) { return { l: short(x.weekStart), p: x.pct }; }) : [];
+    if (ser.length >= 2) {
+      y = ensure(y, 56);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); color(GREEN);
+      text('Punctuality trend - % of lessons on time' + (o.mode === 'week' ? ' (by day)' : ' (by week, week commencing)'), M, y); y += 4;
+      const cx = M + 9, cw = W - 2 * M - 9 - 9, ch = 34, base = y + ch;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(6.5); color(GREY); stroke(LINE); doc.setLineWidth(0.15);
+      [0, 50, 100].forEach(function (v) { const yy = base - ch * v / 100; doc.line(cx, yy, cx + cw, yy); text(v + '%', cx - 1.5, yy + 1, { align: 'right' }); });
+      [[th.good, GREEN], [th.warn, AMBER]].forEach(function (t) {
+        const yy = base - ch * t[0] / 100; stroke(t[1]); doc.setLineWidth(0.25); doc.setLineDashPattern([1.2, 1.2], 0);
+        doc.line(cx, yy, cx + cw, yy); doc.setLineDashPattern([], 0);
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(6.5); color(t[1]); text(t[0] + '%', cx + cw + 1.5, yy + 1);
+      });
+      const slot = cw / ser.length, bwid = Math.min(slot * 0.6, 15);
+      ser.forEach(function (s, i) {
+        const x = cx + i * slot + (slot - bwid) / 2;
+        if (s.p != null) {
+          const hh = Math.max(0.6, ch * s.p / 100);
+          fill(tone(s.p, th)); doc.roundedRect(x, base - hh, bwid, hh, 0.6, 0.6, 'F');
+          doc.setFont('helvetica', 'bold'); doc.setFontSize(7);
+          if (hh >= 9) { color(WHITE); text(Math.round(s.p) + '%', x + bwid / 2, base - hh + 4, { align: 'center' }); }
+          else { color(DARK); text(Math.round(s.p) + '%', x + bwid / 2, base - hh - 1, { align: 'center' }); }
+          doc.setFont('helvetica', 'normal');
+        } else { doc.setFontSize(6); color(GREY); text('n/a', x + bwid / 2, base - 1, { align: 'center' }); }
+        doc.setFontSize(6.5); color(GREY); text(s.l, x + bwid / 2, base + 4, { align: 'center' });
+      });
+      y = base + 9;
+    }
+
+    /* ── tables ── */
+    const heading = function (t, need) {
+      y = ensure(y, need || 30);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); color(GREEN); text(t, M, y);
+      stroke(GREEN); doc.setLineWidth(0.4); doc.line(M, y + 1.6, M + 22, y + 1.6); y += 5;
+    };
+    const tbl = function (extra) {
+      return Object.assign({
+        theme: 'grid', startY: y, margin: { left: M, right: M, top: 20, bottom: 18 },
+        styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.6, lineColor: LINE, lineWidth: 0.1, textColor: DARK, overflow: 'linebreak' },
+        headStyles: { fillColor: GREEN, textColor: WHITE, fontStyle: 'bold', halign: 'center' },
+        alternateRowStyles: { fillColor: [248, 250, 248] },
+      }, extra);
+    };
+    const run = function (opts) { doc.autoTable(opts); y = doc.lastAutoTable.finalY + 6; };
+    const pctCol = function (idx) {
+      return function (hook) {
+        if (hook.section !== 'body' || hook.column.index !== idx) return;
+        const raw = hook.row.raw && hook.row.raw._p;
+        const c = tone(raw, th);
+        hook.cell.styles.textColor = c; hook.cell.styles.fontStyle = 'bold'; hook.cell.styles.fillColor = tint(c, 0.86);
+      };
+    };
+    const statRow = function (first, x) { return first.concat([x.observed, x.ot, x.late, x.abs, x.minsLate, x.timeLost, pct(x.pct)]); };
+    const center = function (n, w) { const o2 = {}; for (let i = 1; i <= n; i++) o2[i] = { halign: 'center', cellWidth: w }; return o2; };
+
+    // teachers: lowest punctuality first
+    const teachers = d.byTeacher.slice().sort(function (a, b) {
+      const x = a.pct == null ? 999 : a.pct, z = b.pct == null ? 999 : b.pct; return (x - z) || (a.name < b.name ? -1 : 1);
+    });
+    heading('Teacher punctuality', 40);
+    if (!teachers.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); color(GREY); text('No teacher data for this period.', M, y); y += 8; }
+    else {
+      const rows = teachers.map(function (t, i) {
+        const r = [i + 1, clean(t.name), t.observed, t.ot, t.late, t.abs, t.minsLate, t.timeLost, pct(t.pct), t.coversTaken || 0, t.covered || 0];
+        r._p = t.pct; return r;
+      });
+      run(tbl({
+        head: [['#', 'Teacher', 'Lessons', 'On time', 'Late', 'Absent', 'Min late', 'Time lost', '% on time', 'Covers taken', 'Covered by others']],
+        body: rows,
+        columnStyles: Object.assign({ 0: { halign: 'center', cellWidth: 7 }, 1: { cellWidth: 'auto' } }, (function () {
+          const c = {}; for (let i = 2; i <= 10; i++) c[i] = { halign: 'center', cellWidth: i >= 9 ? 17 : 15.5 }; return c;
+        })()),
+        didParseCell: pctCol(8),
+      }));
+      doc.setFont('helvetica', 'italic'); doc.setFontSize(7); color(GREY);
+      const note = doc.splitTextToSize(clean('Sorted lowest punctuality first. Time lost = minutes late + ' + d.periodMinutes + ' min per absence. % on time = on time / lessons observed. ' +
+        'Colour key: green ' + th.good + '% and above, amber ' + th.warn + '-' + (th.good - 0.1).toFixed(1) + '%, red below ' + th.warn + '%. A covered lesson counts for the teacher who took the class.'), W - 2 * M);
+      doc.text(note, M, y - 3); y += note.length * 3 - 1;
+    }
+
+    if (T.observed > 0) {
+    heading('By class', 40);
+    run(tbl({
+      head: [['Class', 'Lessons', 'On time', 'Late', 'Absent', 'Min late', 'Time lost', '% on time']],
+      body: d.byClass.map(function (c) { const r = statRow([c.cls], c); r._p = c.pct; return r; }),
+      columnStyles: center(7, 'auto'), didParseCell: pctCol(7),
+    }));
+    heading('By period', 40);
+    run(tbl({
+      head: [['Period', 'Lessons', 'On time', 'Late', 'Absent', 'Min late', 'Time lost', '% on time']],
+      body: d.byPeriod.map(function (p) { const r = statRow([ordFull(p.period)], p); r._p = p.pct; return r; }),
+      columnStyles: center(7, 'auto'), didParseCell: pctCol(7),
+    }));
+    }
+
+    const ex = function (t) { return d.exceptions.filter(function (e) { return t(e); }); };
+    const detail = function (name, list, head, map, widths) {
+      heading(name + ' (' + list.length + ')', 30);
+      if (!list.length) { doc.setFont('helvetica', 'normal'); doc.setFontSize(9); color(GREY); text('None recorded.', M, y); y += 8; return; }
+      run(tbl({ head: [head], body: list.map(map), columnStyles: widths || {} }));
+    };
+    detail('Absences - missed periods', ex(function (e) { return e.type === 'ABS'; }),
+      ['Date', 'Period', 'Class', 'Subject', 'Teacher'],
+      function (e) { return [nice(e.date), ordFull(e.period), e.cls, clean(e.subject), clean(e.name) + (e.cover ? ' (cover)' : '')]; },
+      { 1: { halign: 'center', cellWidth: 22 }, 2: { halign: 'center', cellWidth: 18 } });
+    detail('Late arrivals', ex(function (e) { return e.type === 'LATE'; }),
+      ['Date', 'Period', 'Class', 'Subject', 'Teacher', 'Minutes late'],
+      function (e) { return [nice(e.date), ordFull(e.period), e.cls, clean(e.subject), clean(e.name) + (e.cover ? ' (cover)' : ''), e.mins]; },
+      { 1: { halign: 'center', cellWidth: 22 }, 2: { halign: 'center', cellWidth: 18 }, 5: { halign: 'center', cellWidth: 24, fontStyle: 'bold' } });
+    detail('Late arrivals excused - held in another section', ex(function (e) { return e.type === 'HELD'; }),
+      ['Date', 'Period', 'Class', 'Teacher', 'Min late', 'Still in'],
+      function (e) { return [nice(e.date), ordFull(e.period), e.cls, clean(e.name) + (e.cover ? ' (cover)' : ''), e.mins, clean(e.heldIn)]; },
+      { 1: { halign: 'center', cellWidth: 22 }, 4: { halign: 'center', cellWidth: 20, fontStyle: 'bold' } });
+    detail('Cover lessons', ex(function (e) { return e.cover; }),
+      ['Date', 'Period', 'Class', 'Subject', 'Cover teacher', 'Covering for'],
+      function (e) { return [nice(e.date), ordFull(e.period), e.cls, clean(e.subject), clean(e.name), clean(e.scheduledName)]; },
+      { 1: { halign: 'center', cellWidth: 22 }, 2: { halign: 'center', cellWidth: 18 } });
+
+    /* ── sign-off ── */
+    y = ensure(y, 66);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); color(GREEN); text('Review and sign-off', M, y); y += 4;
+    stroke(LINE); doc.setLineWidth(0.25); fill([252, 253, 252]); doc.roundedRect(M, y, W - 2 * M, 28, 2, 2, 'FD');
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8); color(GREY); text('Comments and recommended action:', M + 3, y + 5);
+    for (let i = 1; i <= 3; i++) doc.line(M + 3, y + 8 + i * 5.5, W - M - 3, y + 8 + i * 5.5);
+    y += 44;
+    const sw = (W - 2 * M - 12) / 3;
+    [['Prepared by', o.user || ''], ['Vice Principal', ''], ['Principal', '']].forEach(function (s, i) {
+      const x = M + i * (sw + 6);
+      stroke(DARK); doc.setLineWidth(0.3); doc.line(x, y, x + sw, y);
+      doc.setFontSize(8); color(DARK); text(s[0] + (s[1] ? ': ' + s[1] : ''), x, y + 4);
+      color(GREY); doc.setFontSize(7); text('Signature and date', x, y + 8);
+    });
+
+    /* ── running header + footer on every page ── */
+    const n = doc.getNumberOfPages();
+    for (let p = 1; p <= n; p++) {
+      doc.setPage(p);
+      if (p > 1) {
+        fill(GREEN); doc.rect(0, 0, W, 2, 'F');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8); color(GREEN); text(school, M, 10);
+        doc.setFont('helvetica', 'normal'); color(GREY); text(title + '  |  ' + label, W - M, 10, { align: 'right' });
+        stroke(LINE); doc.setLineWidth(0.2); doc.line(M, 13, W - M, 13);
+      }
+      stroke(LINE); doc.setLineWidth(0.2); doc.line(M, H - 12, W - M, H - 12);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); color(GREY);
+      text(school + '  |  ' + title, M, H - 7.5);
+      text('Page ' + p + ' of ' + n, W - M, H - 7.5, { align: 'right' });
+    }
+    return doc;
+  }
+
+  g.PdfReport = {
+    make: make,
+    build: function (o) { return make(o).output('blob'); },
+  };
+})(typeof self !== 'undefined' ? self : globalThis);
