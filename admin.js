@@ -109,8 +109,7 @@
       ['periods', 'Bell times', d.periods.length + ' rows'],
       ['terms', 'Terms', (d.terms || []).length + ' terms'],
       ['timetable', 'Timetable', d.timetable.length + ' lessons'],
-      ['users', 'Users & PINs', d.users.length + ' users'],
-      ['danger', 'Reset data', 'Clear test data'],
+      ['users', 'Users & PINs', d.users.length + ' users']
     ];
     box().innerHTML = '<p class="ahint">Changes reach the monitor\'s phone the next time it opens the app with internet.</p><div class="amenu">' +
       items.map(function (m) {
