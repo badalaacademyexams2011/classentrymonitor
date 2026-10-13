@@ -25,6 +25,9 @@
   };
   let entryRenderKey = '';
   let pendingDate = '';
+  let currentNav = null;
+  let currentHistoryEntry = null;
+  let allowHistoryExit = false;
 
   /* ───────────── helpers ───────────── */
 
@@ -237,6 +240,77 @@
     if (S.tab === 'entry') renderEntry(); else if (S.tab === 'today') renderToday();
   }
 
+  function navSnapshot() {
+    return { section: S.section, tab: S.tab, period: S.period, date: S.date, manual: S.manual };
+  }
+
+  function installBackGuard() {
+    currentNav = navSnapshot();
+    const root = { cemRoot: true, nav: currentNav };
+    history.replaceState(root, '', location.href);
+    const guard = { cemGuard: true, nav: currentNav };
+    history.pushState(guard, '', location.href);
+    currentHistoryEntry = guard;
+  }
+
+  function pushNavState() {
+    currentNav = navSnapshot();
+    currentHistoryEntry = { cemNav: true, nav: currentNav };
+    history.pushState(currentHistoryEntry, '', location.href);
+  }
+
+  function activateCurrentTab() {
+    if (S.tab === 'admin' && window.Admin) window.Admin.enter();
+    if (S.tab === 'reports' && window.Reports) window.Reports.render($('#reportsView'));
+    if (S.tab === 'clashes' && window.Clashes) window.Clashes.render($('#clashesView'));
+  }
+
+  function restoreNav(nav) {
+    if (!nav) return;
+    S.section = nav.section || '';
+    S.tab = nav.tab || 'entry';
+    S.period = Number(nav.period) || firstPeriod();
+    S.manual = !!nav.manual;
+    if (nav.date && nav.date !== S.date) {
+      setDate(nav.date);
+      S.entries = new Map(S.all.filter(function (e) { return e.date === S.date; }).map(function (e) { return [e.key, e]; }));
+    }
+    entryRenderKey = '';
+    render();
+    activateCurrentTab();
+  }
+
+  function handleBack(event) {
+    if (allowHistoryExit) return;
+    if (!$('#modal').hidden) {
+      pendingDate = '';
+      closeModal();
+      if (currentHistoryEntry) history.pushState(currentHistoryEntry, '', location.href);
+      return;
+    }
+    const state = event.state;
+    if (state && state.cemRoot) {
+      if (window.confirm('Exit Class Entry Monitor?')) {
+        allowHistoryExit = true;
+        history.go(-1);
+      } else {
+        const guard = { cemGuard: true, nav: currentNav || navSnapshot() };
+        history.pushState(guard, '', location.href);
+        currentHistoryEntry = guard;
+      }
+      return;
+    }
+    if (state && (state.cemGuard || state.cemNav)) {
+      currentHistoryEntry = state;
+      currentNav = state.nav;
+      restoreNav(state.nav);
+      return;
+    }
+    const guard = { cemGuard: true, nav: currentNav || navSnapshot() };
+    history.pushState(guard, '', location.href);
+    currentHistoryEntry = guard;
+  }
+
   function applyEntryDate(date) {
     pendingDate = '';
     setDate(date);
@@ -317,8 +391,14 @@
       const st = e ? e.status : '';
       const lateLabel = st === 'LATE' ? 'Late ' + e.mins : 'Late';
       const effT = e && e.cover ? e.cover : teacher;
+      const resultLabels = { OT: 'On time', LATE: Number(e && e.mins) > 0 ? Number(e.mins) + ' min late' : 'Late', ABS: 'Absent', NONE: 'No lesson' };
+      const readOnlyResult = !isMonitor()
+        ? '<span class="card-result-wrap"><span class="card-result' + (st ? ' result-' + st : ' result-unmarked') + '">' +
+          esc(st ? (resultLabels[st] || 'Recorded') : 'Not marked') + '</span>' +
+          (e && e.note ? '<span class="card-reason">Reason: ' + esc(e.note) + '</span>' : '') + '</span>'
+        : '';
       return '<div id="card-' + encodeURIComponent(cls).replace(/%/g, '_') + '" tabindex="0" class="card ' + (st ? 's-' + st : 'unmarked' + (past ? ' past' : '')) + '" data-cls="' + esc(cls) + '">' +
-        '<div class="row1"><b class="cls">' + esc(cls) + '</b><span class="subj">' + esc(subject || (l ? '' : '— not in timetable —')) + '</span></div>' +
+        '<div class="row1"><span class="card-heading"><b class="cls">' + esc(cls) + '</b><span class="subj">' + esc(subject || (l ? '' : '— not in timetable —')) + '</span></span>' + readOnlyResult + '</div>' +
         '<div class="teach"><span>' + esc(tName(teacher) || 'No teacher set') + '</span>' + telHtml(teacher) +
         (e && e.cover ? '<span class="cov">Cover: ' + esc(tName(e.cover)) + '</span>' + telHtml(e.cover) : '') + holdNote(S.period, cls, effT) +
         (isMonitor() ? '<a data-act="cover">' + (e && e.cover ? 'change cover' : (teacher ? 'cover' : 'set teacher')) + '</a>' : '') + '</div>' +
@@ -346,13 +426,17 @@
       holder.innerHTML = renderCard(cls);
       const fresh = holder.firstElementChild;
       oldCard.className = fresh.className;
+      const oldRow = oldCard.querySelector('.row1'), newRow = fresh.querySelector('.row1');
+      if (oldRow.innerHTML !== newRow.innerHTML) oldRow.innerHTML = newRow.innerHTML;
       const oldTeacher = oldCard.querySelector('.teach'), newTeacher = fresh.querySelector('.teach');
       if (oldTeacher.innerHTML !== newTeacher.innerHTML) oldTeacher.innerHTML = newTeacher.innerHTML;
       ['OT', 'LATE', 'ABS', 'NONE'].forEach(function (act) {
         const oldButton = oldCard.querySelector('[data-act="' + act + '"]');
         const newButton = fresh.querySelector('[data-act="' + act + '"]');
-        oldButton.className = newButton.className;
-        oldButton.textContent = newButton.textContent;
+        if (oldButton && newButton) {
+          oldButton.className = newButton.className;
+          oldButton.textContent = newButton.textContent;
+        }
       });
     });
     const note = host.querySelector('.note');
@@ -868,6 +952,7 @@
     let how = $('#installHelp1');
     if (!how) { how = document.createElement('button'); how.id = 'installHelp1'; how.className = 'link'; how.textContent = 'How to install on this phone'; $('#installBtn1').after(how); }
     how.onclick = installHelp;
+    installBackGuard();
   }
 
   function installHelp() { openModal('<h2>How to install</h2><p>Android Chrome: menu ⋮ → <b>Install app</b> (or Add to Home screen).</p><p>iPhone/iPad Safari: Share → <b>Add to Home Screen</b> → Add.</p><p>Desktop Chrome or Edge: use the install icon in the address bar. If no prompt appears, reload this page once.</p><div class="row-btns"><button id="mClose">Close</button></div>'); $('#mClose').onclick = closeModal; }
@@ -938,7 +1023,7 @@
     }).join('');
   }
 
-  function showPicker() { S.section = ''; S.tab = 'entry'; render(); }
+  function showPicker() { S.section = ''; S.tab = 'entry'; pushNavState(); render(); }
 
   async function startMain() {
     setToday();
@@ -951,6 +1036,7 @@
     S.manual = false;
     $('#login').hidden = true;
     render();
+    installBackGuard();
     refreshSharedEntries(S.date);
     if (pending().length) trySync(false);
     if (window.Admin && window.Admin.drainQueue) window.Admin.drainQueue();
@@ -960,11 +1046,13 @@
 
   function wire() {
     updateThemeControl();
+    window.addEventListener('popstate', handleBack);
     document.querySelectorAll('.theme-toggle').forEach(function (button) { button.onclick = toggleTheme; });
     $('#loginBtn').onclick = doLogin;
     $('#pkList').addEventListener('click', function (e) {
       const b = e.target.closest('[data-sec]'); if (!b) return;
-      S.section = b.dataset.sec; S.manual = isPastDate(); S.tab = 'entry'; S.period = isPastDate() ? firstPeriod() : currentPeriod(); render();
+      S.section = b.dataset.sec; S.manual = isPastDate(); S.tab = 'entry'; S.period = isPastDate() ? firstPeriod() : currentPeriod();
+      pushNavState(); render();
     });
     $('#secBtn').onclick = showPicker;
     $('#pkBadge').onclick = function () { if (S.authBad) reauthModal(); else syncPanel(); };
@@ -981,10 +1069,8 @@
     $('#entryDate').addEventListener('change', function () { chooseEntryDate($('#entryDate').value); });
     document.querySelector('.tabs').addEventListener('click', function (e) {
       const b = e.target.closest('button'); if (!b) return;
-      S.tab = b.dataset.tab; render();
-      if (S.tab === 'admin' && window.Admin) window.Admin.enter();
-      if (S.tab === 'reports' && window.Reports) window.Reports.render($('#reportsView'));
-      if (S.tab === 'clashes' && window.Clashes) window.Clashes.render($('#clashesView'));
+      if (S.tab === b.dataset.tab) return;
+      S.tab = b.dataset.tab; pushNavState(); render(); activateCurrentTab();
     });
     $('#periodBar').addEventListener('click', function (e) {
       const b = e.target.closest('button'); if (!b) return;
@@ -996,7 +1082,7 @@
       if (e.target.closest('#tdPrint')) { printRoster(); return; }
       const tile = e.target.closest('[data-k]'); if (tile) { showToday(tile.dataset.k); return; }
       const tr = e.target.closest('tr.go'); if (!tr) return;
-      S.period = Number(tr.dataset.p); S.manual = true; S.tab = 'entry'; render();
+      S.period = Number(tr.dataset.p); S.manual = true; S.tab = 'entry'; pushNavState(); render();
     });
     $('#list').addEventListener('click', function (e) {
       const btn = e.target.closest('[data-act]'); if (!btn) return;
