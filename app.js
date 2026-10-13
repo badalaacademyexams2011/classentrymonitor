@@ -54,6 +54,29 @@
 
   function isPastDate() { return S.date < ymd(new Date()); }
 
+  function updateThemeControl() {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    document.querySelectorAll('.theme-toggle').forEach(function (button) {
+      button.innerHTML = '<span aria-hidden="true">' + (dark ? '☀' : '☾') + '</span>';
+      button.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+      button.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
+    });
+    document.querySelectorAll('meta[name="theme-color"]').forEach(function (meta) {
+      meta.content = dark ? '#0e3d2a' : '#1b6e4a';
+    });
+  }
+
+  function toggleTheme() {
+    const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    updateThemeControl();
+    try { localStorage.setItem('class-entry-theme', theme); }
+    catch (error) {
+      console.warn('Could not save theme preference.', error);
+      toast('Theme changed, but this browser could not save the preference.');
+    }
+  }
+
   function loadCfg(cfg) {
     S.cfg = cfg;
     S.tt = new Map();
@@ -178,6 +201,7 @@
     $('#entryDate').min = shiftYmd(d, -7);
     $('#entryDate').max = d;
     $('#pastEntryWarn').hidden = !isPastDate();
+    updateThemeControl();
     $('#hdrUser').textContent = (S.cfg.school || 'School') + ' · ' + (S.user ? S.user.name : '');
     const sb = $('#secBtn');
     sb.hidden = sections().length < 2;
@@ -887,6 +911,8 @@
   /* ───────────── events ───────────── */
 
   function wire() {
+    updateThemeControl();
+    document.querySelectorAll('.theme-toggle').forEach(function (button) { button.onclick = toggleTheme; });
     $('#loginBtn').onclick = doLogin;
     $('#pkList').addEventListener('click', function (e) {
       const b = e.target.closest('[data-sec]'); if (!b) return;

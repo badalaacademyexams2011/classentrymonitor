@@ -182,7 +182,6 @@
       ['users', 'Users & PINs', d.users.length + ' users'],
       ['devices', 'Devices', 'Manage synced phones'],
       ['queued', 'Queued changes (' + q.length + ')', q.length ? 'Saved offline' : 'No pending saves'],
-      ['danger', 'Reset data', 'Clear test data'],
     ];
     box().innerHTML = '<p class="ahint">Changes reach the monitor\'s phone the next time it opens the app with internet.</p><div class="amenu">' +
       items.map(function (m) {
@@ -210,7 +209,6 @@
     else if (view === 'users') users();
     else if (view === 'devices') devices();
     else if (view === 'queued') queuedChanges();
-    else if (view === 'danger') danger();
   }
 
   /* ───────── school name ───────── */
@@ -616,23 +614,6 @@
       };
     }
     draw();
-  }
-
-  /* ───────── reset data ───────── */
-
-  function danger() {
-    box().innerHTML = head('Reset data', 'Use these to remove test data before you go live. This cannot be undone.') +
-      '<div class="dz"><b>Clear teachers, subjects and timetable</b><p class="muted">Deletes every teacher, subject and lesson. Classes, bell times and users stay.</p><button id="dzT" class="dzbtn">Clear teachers, subjects &amp; timetable</button></div>' +
-      '<div class="dz"><b>Clear all recorded entries</b><p class="muted">Deletes every row in the Log and the correction history. Do this once, just before the first real school day. Phones keep their own copy of unsynced entries.</p><button id="dzL" class="dzbtn">Clear all recorded entries</button></div>';
-    wireBack();
-    const wipe = async function (what) {
-      const t = prompt('This cannot be undone. Type DELETE (in capitals) to confirm.');
-      if (t === null) return;
-      if (t.trim() !== 'DELETE') { showErr('Not confirmed: you must type DELETE in capitals.'); return; }
-      if (await save({ what: what, confirm: 'DELETE' }, 'admin_clear', 'Cleared ✓')) danger();
-    };
-    $('#dzT').onclick = function () { wipe('timetable'); };
-    $('#dzL').onclick = function () { wipe('log'); };
   }
 
   g.Admin = { enter: enter, drainQueue: drainQueue };
