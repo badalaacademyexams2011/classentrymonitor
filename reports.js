@@ -14,7 +14,7 @@
   const parse = function (s) { const p = s.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2], 12)); };
   const fmt = function (d) { return d.toISOString().slice(0, 10); };
   const addDays = function (s, n) { return fmt(new Date(parse(s).getTime() + n * 86400000)); };
-  const wsDow = function () { const w = A().S.cfg && A().S.cfg.weekStart; return w == null ? 1 : w; };   // first day of the school week (0 = Sun)
+  const wsDow = function () { const w = A().S.cfg && A().S.cfg.weekStart; return isMissing(w) ? 1 : w; };   // first day of the school week (0 = Sun)
   const mondayOf = function (s) { return addDays(s, -((parse(s).getUTCDay() - wsDow() + 7) % 7)); };
   const monthStart = function (s) { return s.slice(0, 8) + '01'; };
   const monthEnd = function (s) { const d = parse(s); return fmt(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 12))); };
@@ -28,6 +28,7 @@
 
   const A = function () { return g.App; };
   const esc = function (s) { return A().esc(s); };
+  const isMissing = function (v) { return v === null || v === undefined; };
 
   function terms() { return (A().S.cfg && A().S.cfg.terms) || []; }
 
@@ -50,7 +51,9 @@
   const errText = function (code) {
     return ({ auth: 'Your PIN was not accepted. Sign out and sign in again.', forbidden: 'Only admins can view reports.',
               locked: 'Too many wrong PINs. Try again in 10 minutes.', range_too_long: 'That date range is too long.',
-              bad_range: 'That date range is not valid.', bad_section: 'That section no longer exists. Pick another.' })[code] || 'Server problem (' + (code || 'unknown') + ').';
+              bad_range: 'That date range is not valid.', bad_section: 'That section no longer exists. Pick another.',
+              quota: 'The school records service is at its limit right now. Nothing was lost — try again in a minute.',
+              rate_limited: 'Too many report requests just now. Wait a few seconds and try again.' })[code] || 'Server problem (' + (code || 'unknown') + ').';
   };
 
   async function load(force) {
@@ -73,8 +76,8 @@
   }
 
   /* ───────── rendering ───────── */
-  const pcClass = function (p, th) { return p == null ? 'n' : p >= th.good ? 'g' : p >= th.warn ? 'a' : 'r'; };
-  const pcHtml = function (p, th) { return '<span class="pc ' + pcClass(p, th) + '">' + (p == null ? '–' : p.toFixed(1) + '%') + '</span>'; };
+  const pcClass = function (p, th) { return isMissing(p) ? 'n' : p >= th.good ? 'g' : p >= th.warn ? 'a' : 'r'; };
+  const pcHtml = function (p, th) { return '<span class="pc ' + pcClass(p, th) + '">' + (isMissing(p) ? '–' : p.toFixed(1) + '%') + '</span>'; };
 
   function draw() {
     const host = R.host; if (!host) return;
@@ -102,7 +105,8 @@
       h += '<div class="rnav"><button class="arrow" style="width:auto;padding:0 12px;font-size:.9rem" data-jump="0">This week</button>' +
         '<button class="arrow" style="width:auto;padding:0 12px;font-size:.9rem" data-jump="-1">Last week</button>' + weekPicker() + '</div>';
     }
-    h += '<div class="rtools"><button id="rReload">↻ Refresh</button><button id="rExport" class="exp"' + (R.data ? '' : ' disabled') + '>Export · PDF / CSV</button></div>';
+    h += '<div class="rtools"><button id="rReload">↻ Refresh</button><button id="rExport" class="exp"' + (R.data ? '' : ' disabled') + '>Export · PDF / CSV</button>' +
+      (R.mode === 'term' && R.data ? '<button id="rWrapUp">Term wrap-up PDF</button>' : '') + '</div>';
 
     if (R.mode === 'term' && !terms().length) {
       h += '<div class="rmsg">No terms set up yet.<br>Add the term names and dates in <b>Admin → Terms</b>, then come back here.</div>';
@@ -133,7 +137,7 @@
     };
     let h = '<div class="tot">' +
       tile('', T.observed, 'Lessons observed', '', false) +
-      tile('', T.pct == null ? '–' : T.pct.toFixed(1) + '%', 'On time', pcClass(T.pct, th) === 'g' ? 'g' : pcClass(T.pct, th) === 'a' ? 'a' : pcClass(T.pct, th) === 'r' ? 'r' : '', false) +
+      tile('', isMissing(T.pct) ? '–' : T.pct.toFixed(1) + '%', 'On time', pcClass(T.pct, th) === 'g' ? 'g' : pcClass(T.pct, th) === 'a' ? 'a' : pcClass(T.pct, th) === 'r' ? 'r' : '', false) +
       tile('LATE', T.late, 'Late', 'a', true) + tile('ABS', T.abs, 'Absent', 'r', true) +
       tile('COVER', T.covers || 0, 'Cover lessons', '', true) + tile('LOSS', T.timeLost, 'Time lost (min)', '', true) +
       (T.excused ? tile('HELD', T.excused, 'Held in other section', '', true) : '') + '</div>' +
@@ -155,7 +159,7 @@
 
   function sortedTeachers(d) {
     return d.byTeacher.slice().sort(function (a, b) {
-      const x = a.pct == null ? 999 : a.pct, y = b.pct == null ? 999 : b.pct;
+      const x = isMissing(a.pct) ? 999 : a.pct, y = isMissing(b.pct) ? 999 : b.pct;
       return (x - y) || (a.name < b.name ? -1 : 1);
     });
   }
@@ -179,7 +183,7 @@
     if (!pts.length) return '<div class="rmsg">Trend needs a week, month or term.</div>';
     return '<div class="bars">' + pts.map(function (p) {
       const c = pcClass(p.s.pct, d.thresholds);
-      return '<div class="bar"><span>' + esc(p.label) + '</span><div class="track"><div class="fill ' + (c === 'n' ? '' : c) + '" style="width:' + (p.s.pct || 0) + '%"></div></div><b>' + (p.s.pct == null ? '–' : p.s.pct.toFixed(0) + '%') + '</b></div>';
+      return '<div class="bar"><span>' + esc(p.label) + '</span><div class="track"><div class="fill ' + (c === 'n' ? '' : c) + '" style="width:' + (p.s.pct || 0) + '%"></div></div><b>' + (isMissing(p.s.pct) ? '–' : p.s.pct.toFixed(0) + '%') + '</b></div>';
     }).join('') + '</div>';
   }
 
@@ -193,7 +197,7 @@
     else chip = '<span class="mm">cover</span>';
     const cov = e.cover ? '<span class="muted"> · covering for ' + esc(e.scheduledName) + '</span>' : '';
     return '<div class="dr"><div class="dl1"><b>' + esc(nice(e.date)) + '</b> · ' + ordFull(e.period) + ' · ' + esc(e.cls) + (e.subject ? ' · ' + esc(e.subject) : '') + '</div>' +
-      '<div class="dl2"><span>' + esc(e.name) + '</span>' + A_.telHtml(e.teacher) + chip + cov + '</div></div>';
+      '<div class="dl2"><span>' + esc(e.name) + '</span>' + A_.telHtml(e.teacher) + chip + cov + (e.note ? '<span class="muted"> · ' + esc(e.note) + '</span>' : '') + '</div></div>';
   }
 
   function showKind(kind) {
@@ -207,24 +211,31 @@
     A().showList(titles[kind] + ' (' + list.length + ')', sum, list.map(exRow));
   }
 
-  function showTeacher(code) {
+  async function showTeacher(code) {
     const d = R.data; if (!d) return;
     const t = d.byTeacher.find(function (x) { return x.code === code; }); if (!t) return;
     const list = d.exceptions.filter(function (e) { return e.teacher === code || (e.cover && e.scheduled === code); });
     const sum = t.observed + ' lessons observed · ' + t.late + ' late (' + t.minsLate + ' min) · ' + t.abs + ' absent · ' +
-      (t.pct == null ? 'no punctuality score' : t.pct.toFixed(1) + '% on time') +
+      (isMissing(t.pct) ? 'no punctuality score' : t.pct.toFixed(1) + '% on time') +
       (t.coversTaken ? ' · covered ' + t.coversTaken + ' for others' : '') + (t.covered ? ' · ' + t.covered + ' of theirs covered' : '');
     A().showList(t.name + (A().telHtml(code) ? '' : ''), sum + (A().telHtml(code) ? '<div style="margin-top:6px">' + A().telHtml(code) + '</div>' : ''), list.map(exRow));
+    try {
+      const res = await g.Core.api('teacher_history', { code: code, limit: 50 });
+      if (!res || !res.ok) { if (res && (res.error === 'quota' || res.error === 'rate_limited')) A().toast(errText(res.error)); return; }
+      const sheet = document.getElementById('sheet'); if (!sheet) return;
+      const rows = res.rows || [];
+      sheet.insertAdjacentHTML('beforeend', '<h3>Recent history (all terms)</h3>' + (rows.length ? '<div class="alist">' + rows.map(function (r) { return '<div class="dr"><b>' + esc(r.date) + '</b> · ' + esc(ordFull(r.period)) + ' · ' + esc(r.cls) + ' · ' + esc(r.status === 'ABS' ? 'Absent' : r.mins + ' min late') + (r.heldIn ? ' · held in ' + esc(r.heldIn) : '') + (r.note ? ' · ' + esc(r.note) : '') + '</div>'; }).join('') + '</div>' : '<p class="muted">No earlier incidents.</p>'));
+    } catch (e) { /* current-range details remain useful offline */ }
   }
 
   /* ───────── export ───────── */
   const fname = function (rg, ext, tag) { return 'ClassEntry_' + rg.title + (R.section ? '_' + R.section.replace(/\W+/g, '') : '') + (tag ? '_' + tag : '') + '_' + rg.from + (rg.to !== rg.from ? '_to_' + rg.to : '') + '.' + ext; };
 
   function csv(head, rows) {
-    const q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    const q = function (v) { v = String(isMissing(v) ? '' : v); if (/^[=+\-@]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
     return '\ufeff' + [head].concat(rows).map(function (r) { return r.map(q).join(','); }).join('\r\n');
   }
-  const stat = function (x) { return [x.observed, x.ot, x.late, x.abs, x.minsLate, x.timeLost, x.pct == null ? '' : x.pct]; };
+  const stat = function (x) { return [x.observed, x.ot, x.late, x.abs, x.minsLate, x.timeLost, isMissing(x.pct) ? '' : x.pct]; };
   const STAT_HEAD = ['Lessons observed', 'On time', 'Late', 'Absent', 'Minutes late', 'Time lost (min)', '% on time'];
 
   function csvFor(kind) {
@@ -235,16 +246,17 @@
     if (kind === 'periods') return csv(['Period'].concat(STAT_HEAD), d.byPeriod.map(function (p) { return [ordFull(p.period)].concat(stat(p)); }));
     if (kind === 'days') return csv(['Date', 'Day'].concat(STAT_HEAD), d.byDay.map(function (x) { return [x.date, x.day].concat(stat(x)); }));
     if (kind === 'weeks') return csv(['Week starting'].concat(STAT_HEAD), d.byWeek.map(function (x) { return [x.weekStart].concat(stat(x)); }));
-    return csv(['Date', 'Day', 'Period', 'Section', 'Class', 'Subject', 'Type', 'Minutes late', 'Teacher', 'Phone', 'Covering for', 'Held in (overlap)'],
-      d.exceptions.map(function (e) { return [e.date, e.day, e.period, e.section || '', e.cls, e.subject, e.type, e.type === 'LATE' || e.type === 'HELD' ? e.mins : '', e.name, (g.App.S.teachers.get(e.teacher) || {}).phone || '', e.cover ? e.scheduledName : '', e.heldIn || '']; }));
+    return csv(['Date', 'Day', 'Period', 'Section', 'Class', 'Subject', 'Type', 'Minutes late', 'Teacher', 'Phone', 'Covering for', 'Held in (overlap)', 'Absence note'],
+      d.exceptions.map(function (e) { return [e.date, e.day, e.period, e.section || '', e.cls, e.subject, e.type, e.type === 'LATE' || e.type === 'HELD' ? e.mins : '', e.name, (g.App.S.teachers.get(e.teacher) || {}).phone || '', e.cover ? e.scheduledName : '', e.heldIn || '', e.note || '']; }));
   }
 
   async function saveBlob(blob, name, forceDownload) {
-    try {
-      if (forceDownload) throw new Error('download');
+    if (!forceDownload) {
+      try {
       const file = new File([blob], name, { type: blob.type });
       if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
-    } catch (e) { if (e && e.name === 'AbortError') return; }
+      } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
@@ -288,12 +300,12 @@
     const cfg = A().S.cfg || {};
     if (opts.footer === undefined) opts.footer = cfg.reportFooter;
     if (opts.generatedBy === undefined) opts.generatedBy = cfg.reportBy;
-    return g.PdfReport.build(opts);
+    return opts.wrapUp ? g.PdfReport.buildWrapUp(opts) : g.PdfReport.build(opts);
   }
 
   async function exportPdf() {
     const rg = rangeFor();
-    A().toast('Preparing PDF…');
+    A().toast('Preparing PDF…', null, true);
     try {
       const blob = await makePdf({
         data: R.data, mode: R.mode, title: rg.title + ' Class Entry Report' + (R.section ? ' - ' + R.section : ''), label: rg.label,
@@ -302,7 +314,31 @@
       A().closeModal();
       await saveBlob(blob, fname(rg, 'pdf'));
     } catch (e) {
-      A().toast('Could not create the PDF: ' + (e && e.message ? e.message : 'unknown error'));
+      A().toast(e && e.message === 'quota' ? errText('quota') : 'Could not create the PDF: ' + (e && e.message ? e.message : 'unknown error'));
+    }
+  }
+
+  async function exportWrapUp() {
+      const tm = terms()[R.termIdx], rg = rangeFor();
+      if (!tm || !R.data) return;
+      A().toast('Preparing term wrap-up…', null, true);
+      try {
+        const weeks = [];
+        for (let start = mondayOf(tm.start); start <= tm.end; start = addDays(start, 7)) {
+          const from = start < tm.start ? tm.start : start, end = addDays(start, 6), to = end > tm.end ? tm.end : end;
+          const res = await g.Core.api('report', { from: from, to: to, section: R.section });
+          if (!res || !res.ok) throw new Error(errText(res && res.error));
+          weeks.push({ from: from, to: to, label: nice(from) + ' - ' + niceY(to), data: res });
+        }
+        const blob = await makePdf({
+          wrapUp: true, term: tm, weeks: weeks, termData: R.data, data: R.data, mode: 'term',
+          title: 'Term Wrap-up', label: rg.label, school: R.data.school || A().S.cfg.school || '',
+          user: (A().S.user || {}).name || '',
+        });
+        await saveBlob(blob, fname(rg, 'pdf', 'wrap-up'));
+        A().toast('Term wrap-up PDF ready ✓');
+      } catch (e) {
+        A().toast('Could not create the term wrap-up: ' + (e && e.message ? e.message : 'unknown error'));
     }
   }
 
@@ -332,7 +368,7 @@
     host.addEventListener('click', function (e) {
       const t = e.target;
       const mode = t.closest('[data-mode]');
-      if (mode) { R.mode = mode.dataset.mode; if (R.mode === 'term' && R.termIdx == null) R.termIdx = defaultTerm(); load(false); return; }
+      if (mode) { R.mode = mode.dataset.mode; if (R.mode === 'term' && isMissing(R.termIdx)) R.termIdx = defaultTerm(); load(false); return; }
       const nav = t.closest('[data-nav]');
       if (nav) {
         const n = Number(nav.dataset.nav);
@@ -346,6 +382,7 @@
       const row = t.closest('tr.go'); if (row) { showTeacher(row.dataset.t); return; }
       if (t.closest('#rReload') || t.closest('#rReload2')) { load(true); return; }
       if (t.closest('#rExport')) { if (R.data) exportModal(); return; }
+      if (t.closest('#rWrapUp')) { exportWrapUp(); return; }
     });
     host.addEventListener('change', function (e) {
       if (e.target.id === 'rTerm') { R.termIdx = Number(e.target.value); load(false); }
@@ -362,13 +399,20 @@
   }
 
   g.Reports = {
+    /** Mounts the Reports screen into its host. */
     render: function (host) {
       R.host = host;
       if (!R.built) { R.built = true; R.anchor = A().S.date; R.termIdx = defaultTerm(); wire(host); load(false); return; }
       if (!host.innerHTML) draw();
     },
     // exposed for tests
+    /** Builds and saves the supplied daily report as a PDF. */
     pdfToday: async function (opts) { const file = opts.file; delete opts.file; const blob = await makePdf(opts); await saveBlob(blob, file, true); },
-    _state: R, _rangeFor: rangeFor, _csvFor: csvFor,
+    /** Exposes the current report state for diagnostics and tests. */
+    _state: R,
+    /** Returns the active report date range and label. */
+    _rangeFor: rangeFor,
+    /** Exports one selected report category as CSV text. */
+    _csvFor: csvFor,
   };
 })(typeof self !== 'undefined' ? self : globalThis);

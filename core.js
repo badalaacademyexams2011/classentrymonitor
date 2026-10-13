@@ -32,14 +32,21 @@
     });
   }
 
+  /** Reads a named value from the IndexedDB metadata store. */
   const metaGet = function (k) { return run('meta', 'readonly', function (s) { return s.get(k); }).then(function (x) { return x ? x.v : undefined; }); };
+  /** Stores a named value in the IndexedDB metadata store. */
   const metaSet = function (k, v) { return run('meta', 'readwrite', function (s) { return s.put({ k: k, v: v }); }); };
+  /** Removes a named value from the IndexedDB metadata store. */
   const metaDel = function (k) { return run('meta', 'readwrite', function (s) { return s.delete(k); }); };
+  /** Inserts or replaces one locally queued entry. */
   const entryPut = function (e) { return run('entries', 'readwrite', function (s) { return s.put(e); }); };
+  /** Returns all locally stored entries. */
   const entryAll = function () { return run('entries', 'readonly', function (s) { return s.getAll(); }); };
+  /** Deletes one local entry by its stable key. */
   const entryDel = function (k) { return run('entries', 'readwrite', function (s) { return s.delete(k); }); };
 
   // Housekeeping: drop entries that are safely on the server and older than `days`.
+  /** Deletes synced entries older than the requested retention window. */
   async function prune(days) {
     const cut = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
     const all = await entryAll();
@@ -47,7 +54,8 @@
   }
 
   // Update an entry only if it has not changed since we sent it (so a later edit is never marked as synced).
-  function patchIfUnchanged(key, recordedAt, patch) {
+  // A sync acknowledgement may only update the exact revision that was sent.
+  function patchIfUnchanged(key, recordedAt, rev, patch) {
     return db().then(function (d) {
       return new Promise(function (res, rej) {
         const t = d.transaction('entries', 'readwrite');
@@ -55,7 +63,7 @@
         const q = s.get(key);
         q.onsuccess = function () {
           const e = q.result;
-          if (e && e.recordedAt === recordedAt) s.put(Object.assign(e, patch(e)));
+          if (e && e.recordedAt === recordedAt && e.rev === rev) s.put(Object.assign(e, patch(e)));
         };
         t.oncomplete = function () { res(); };
         t.onerror = t.onabort = function () { rej(t.error); };
@@ -63,6 +71,7 @@
     });
   }
 
+  /** Sends one authenticated request to the Apps Script endpoint. */
   async function api(action, extra) {
     const cfg = g.APP_CONFIG || {};
     if (!cfg.ENDPOINT || String(cfg.ENDPOINT).indexOf('PASTE') === 0) throw new Error('not_configured');
@@ -84,6 +93,7 @@
   }
 
   let syncing = null;
+  /** Starts or joins the current idempotent entry sync. */
   function syncNow() {
     if (syncing) return syncing;
     syncing = doSync().then(function (r) { syncing = null; return r; }, function (e) { syncing = null; throw e; });
@@ -99,13 +109,15 @@
     if (await metaGet('authBad')) return { ok: false, error: 'auth' };
     if (!(await metaGet('pin'))) return { ok: false, error: 'no_login' };
     const device = (await metaGet('device')) || '';
-    let saved = 0, rejected = 0;
+    let saved = 0, rejected = 0, frozen, serverNow, serverDate;
 
     for (let i = 0; i < pending.length; i += 100) {
       const batch = pending.slice(i, i + 100);
       const payload = batch.map(function (e) {
         return { key: e.key, date: e.date, period: e.period, cls: e.cls, subject: e.subject, teacher: e.teacher,
-                 cover: e.cover, status: e.status, mins: e.mins, recordedAt: e.recordedAt, recordedBy: e.recordedBy || '' };
+                 cover: e.cover, status: e.status, mins: e.mins, note: e.note || '',
+                 heldMins: e.heldMins === null || e.heldMins === undefined ? '' : e.heldMins, heldIn: e.heldIn || '',
+                 rev: e.rev || 0, recordedAt: e.recordedAt, recordedBy: e.recordedBy || '' };
       });
       let res;
       try {
@@ -114,35 +126,39 @@
         return { ok: false, error: 'network', saved: saved, rejected: rejected };
       }
       if (!res || !res.ok) {
-        if (res && res.error === 'auth') await metaSet('authBad', 1);
-        return { ok: false, error: (res && res.error) || 'server', saved: saved, rejected: rejected };
+        if (res && (res.error === 'auth' || res.error === 'revoked')) await metaSet('authBad', 1);
+        return { ok: false, error: (res && res.error) || 'server', saved: saved, rejected: rejected, serverNow: res && res.serverNow, serverDate: res && res.serverDate };
       }
 
+      serverNow = res.serverNow || serverNow;
+      serverDate = res.serverDate || serverDate;
+      if (res.frozen !== undefined) frozen = !!res.frozen;
       const ok = new Set(res.saved || []);
       const now = new Date().toISOString();
       for (const e of batch) {
         if (ok.has(e.key)) {
-          await patchIfUnchanged(e.key, e.recordedAt, function () { return { synced: 1, syncedAt: now, err: null }; });
+          await patchIfUnchanged(e.key, e.recordedAt, e.rev, function () { return { synced: 1, syncedAt: now, err: null }; });
           saved++;
         }
       }
       for (const rj of res.rejected || []) {
         const e = batch.find(function (x) { return x.key === rj.key; });
         if (e) {
-          await patchIfUnchanged(e.key, e.recordedAt, function () { return { err: rj.reason }; });
+          await patchIfUnchanged(e.key, e.recordedAt, e.rev, function () { return { err: rj.reason }; });
           rejected++;
         }
       }
     }
     await metaSet('lastSync', new Date().toISOString());
-    return { ok: rejected === 0, saved: saved, rejected: rejected };
+    return { ok: rejected === 0, saved: saved, rejected: rejected, frozen: frozen, serverNow: serverNow, serverDate: serverDate };
   }
 
+  /** Refreshes the timetable/config and optionally authenticates with a supplied PIN. */
   async function refreshConfig(pin) {
     if (!pin && (await metaGet('authBad'))) return { ok: false, error: 'auth' };
     const res = await api('config', pin ? { pin: pin } : {});
     if (!res || !res.ok) {
-      if (res && res.error === 'auth' && !pin) await metaSet('authBad', 1);
+      if (res && (res.error === 'auth' || res.error === 'revoked')) await metaSet('authBad', 1);
       return res || { ok: false, error: 'server' };
     }
     res.skewMs = res.serverNow ? Date.now() - Date.parse(res.serverNow) : 0;   // phone clock minus server clock
