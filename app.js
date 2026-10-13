@@ -9,7 +9,7 @@
   };
   const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const DEBUG = false;
-  const TIMINGS = { syncDebounce: 2500, retry: [5000, 15000, 45000, 120000], refresh: 180000, tick: 60000, undo: 4000, toast: 2600 };
+  const TIMINGS = { syncDebounce: 2500, retry: [5000, 15000, 45000, 120000], refresh: 180000, sharedEntries: 30000, tick: 15000, undo: 4000, toast: 2600 };
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const ord = function (n) { const v = n % 100; return v >= 11 && v <= 13 ? n + 'th' : n + (({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th'); };
   const pad = function (n) { return String(n).padStart(2, '0'); };
@@ -139,16 +139,22 @@
   }
   // True on days that are not school days, or have no timetable at all.
   function noSchool() {
+    if (holidayForDate(S.date)) return true;
     const sd = S.cfg && S.cfg.days;
     if (sd && sd.length && sd.indexOf(S.day) < 0) return true;
     const days = new Set(((S.cfg && S.cfg.timetable) || []).map(function (r) { return r[0]; }));
     return days.size > 0 && !days.has(S.day);
   }
   function noSchoolReason() {
+    const holiday = holidayForDate(S.date);
+    if (holiday) return { reason: 'holiday', day: S.day, name: holiday.name };
     const sd = S.cfg && S.cfg.days;
     if (sd && sd.length && sd.indexOf(S.day) < 0) return { reason: 'holiday', day: S.day };
     const days = new Set(((S.cfg && S.cfg.timetable) || []).map(function (r) { return r[0]; }));
     return { reason: days.size && !days.has(S.day) ? 'no_timetable' : 'unset', day: S.day };
+  }
+  function holidayForDate(date) {
+    return ((S.cfg && S.cfg.holidays) || []).find(function (h) { return h.start <= date && date <= h.end; }) || null;
   }
   function periodLenFor(sec, n) { const r = bellRange(sec, S.day, n); return r ? r.e - r.s : 40; }
 
@@ -205,9 +211,9 @@
     }
     if (!ensureSection()) { renderPicker(); return; }
     $('#picker').hidden = true; $('#main').hidden = false;
-    if (S.tab === 'admin' && !(S.user && S.user.role === 'Admin')) S.tab = 'entry';
+    if (S.tab === 'admin' && !(S.user && (S.user.role === 'Admin' || S.user.role === 'Sub-admin'))) S.tab = 'entry';
     if ((S.tab === 'reports' || S.tab === 'clashes') && !S.user) S.tab = 'entry';
-    $('#adminTab').hidden = !(S.user && S.user.role === 'Admin');
+    $('#adminTab').hidden = !(S.user && (S.user.role === 'Admin' || S.user.role === 'Sub-admin'));
     $('#reportsTab').hidden = !S.user;
     $('#hdrDate').textContent = S.dateLabel;
     $('#entryDate').value = S.date;
@@ -262,6 +268,7 @@
     const n = pending().length;
     b.className = 'badge';
     if (S.authBad) { b.classList.add('bad'); b.textContent = '! Sign in again'; }
+    else if (n && !isMonitor()) { b.classList.add('bad'); b.textContent = 'Monitor required · ' + n; }
     else if (!S.online) { b.classList.add('off'); b.textContent = 'Offline' + (n ? ' · ' + n : ''); }
     else if (n) { b.classList.add('pend'); b.textContent = '⟳ ' + n + ' to sync'; }
     else if (rejected().length) { b.classList.add('bad'); b.textContent = '⚠ ' + rejected().length + ' rejected'; }
@@ -274,7 +281,10 @@
       $('#periodBar').innerHTML = '';
       $('#periodInfo').textContent = 'No school today';
       const why = noSchoolReason();
-      $('#list').innerHTML = '<div class="empty">' + (why.reason === 'holiday' ? (isPastDate() ? 'The selected date (' : 'Today (') + esc(why.day) + ') is not a school day.' : 'No lessons are timetabled for ' + esc(why.day) + '.') + '</div>';
+      const noSchoolText = why.reason === 'holiday'
+        ? (S.date === S.currentDay ? 'No school today' : 'No school on ' + S.date) + (why.name ? ' — ' + esc(why.name) : ' (' + esc(why.day) + ' is not a school day)')
+        : 'No lessons are timetabled for ' + esc(why.day) + '.';
+      $('#list').innerHTML = '<div class="empty">' + noSchoolText + '</div>';
       return;
     }
     const periods = (pds().length ? pds() : [1, 2, 3, 4, 5, 6, 7, 8].map(function (n) { return { n: n }; }));
@@ -311,13 +321,13 @@
         '<div class="row1"><b class="cls">' + esc(cls) + '</b><span class="subj">' + esc(subject || (l ? '' : '— not in timetable —')) + '</span></div>' +
         '<div class="teach"><span>' + esc(tName(teacher) || 'No teacher set') + '</span>' + telHtml(teacher) +
         (e && e.cover ? '<span class="cov">Cover: ' + esc(tName(e.cover)) + '</span>' + telHtml(e.cover) : '') + holdNote(S.period, cls, effT) +
-        '<a data-act="cover">' + (e && e.cover ? 'change cover' : (teacher ? 'cover' : 'set teacher')) + '</a></div>' +
-        '<div class="btns">' +
+        (isMonitor() ? '<a data-act="cover">' + (e && e.cover ? 'change cover' : (teacher ? 'cover' : 'set teacher')) + '</a>' : '') + '</div>' +
+        (isMonitor() ? '<div class="btns">' +
         '<button class="b ok' + (st === 'OT' ? ' on' : '') + '" data-act="OT" aria-label="On time">✓</button>' +
         '<button class="b late' + (st === 'LATE' ? ' on' : '') + '" data-act="LATE">' + esc(lateLabel) + '</button>' +
         '<button class="b abs' + (st === 'ABS' ? ' on' : '') + '" data-act="ABS" aria-label="Absent">A</button>' +
         '<button class="b none' + (st === 'NONE' ? ' on' : '') + '" data-act="NONE" aria-label="No lesson">X</button>' +
-        '</div></div>';
+        '</div>' : '') + '</div>';
     };
     const empty = !visible.length ? '<div class="empty">' + (classes.length ? 'All classes marked for this period ✓' : 'No classes in this section. Ask the Admin to add them.') + '</div>' : '';
     const hiddenNote = hiddenN && visible.length ? '<div class="muted note">' + hiddenN + (hiddenN === 1 ? ' class has' : ' classes have') + ' no lesson in this period.</div>' : '';
@@ -538,6 +548,10 @@
   /* ───────────── marking ───────────── */
 
   async function mark(cls, status, mins, extra) {
+    if (isFrozen()) {
+      toast(isMonitor() ? 'Monitoring is frozen for your account. Ask the Admin.' : 'Attendance is read-only. Only the assigned Monitor can record entries.');
+      return;
+    }
     const key = S.date + '|' + S.period + '|' + cls;
     const prev = S.entries.get(key) || {};
     const l = lesson(S.period, cls) || {};
@@ -648,11 +662,12 @@
     S.dateOff = !!res.serverDate && res.serverDate !== ymd(new Date());
   }
 
-  function isFrozen() { return !!(S.user && S.user.frozen); }
+  function isMonitor() { return !!(S.user && S.user.role === 'Monitor'); }
+  function isFrozen() { return !isMonitor() || !!(S.user && S.user.frozen); }
   function renderFrozen() {
     const el = $('#frozenWarn');
     el.hidden = !isFrozen();
-    if (isFrozen()) el.textContent = '⛔ Monitoring is frozen for your account by the Admin. You can view reports and clashes, but new entries are not accepted.';
+    if (isFrozen()) el.textContent = isMonitor() ? '⛔ Monitoring is frozen for your account by the Admin. You can view reports and clashes, but new entries are not accepted.' : 'Read-only attendance view. Only the assigned Monitor can record or correct class entries.';
   }
 
   function renderClock() {
@@ -704,6 +719,7 @@
 
   async function trySync(manual) {
     if (!pending().length) { if (manual) toast('Nothing to sync'); return; }
+    if (!isMonitor()) { if (manual) toast('Only the assigned Monitor can sync attendance entries.'); return; }
     if (S.authBad) { renderBadge(); if (manual) toast('Sign in again to sync'); return; }
     if (!navigator.onLine) { S.online = false; renderBadge(); if (manual) toast('No connection — entries are saved on this phone'); return; }
     S.online = true;
@@ -750,10 +766,12 @@
       const res = await Core.refreshConfig();
       if (res && res.ok) {
         S.authBad = false;
+        const previousRole = S.user && S.user.role;
         S.user = res.user;
         renderFrozen();
         checkClock(res); renderClock();
         if (res.version !== before) { loadCfg(res); toast('Timetable updated'); render(); }
+        else if (previousRole !== S.user.role) render();
       } else if (res && res.error === 'auth') { S.authBad = true; renderBadge(); }
     } catch (e) { /* offline or not configured: keep working with the stored copy */ }
   }
@@ -888,8 +906,18 @@
 
   function secStatus(sec) {
     const ps = pdsFor(sec, S.day), cl = classesOf(sec);
+    const holiday = holidayForDate(S.date);
+    if (holiday) return { t: (S.date === S.currentDay ? 'No school today · ' : 'No school · ') + holiday.name, warn: false };
     if (noSchool()) return { t: 'No school today', warn: false };
     if (!ps.length || !cl.length) return { t: 'Not set up yet', warn: false };
+    const ends = ps.map(function (p) { return toMin(p.end); }).filter(function (v) { return v !== null; });
+    if (ends.length && nowMin() >= Math.max.apply(Math, ends)) {
+      const sectionEnds = sections().map(function (name) {
+        return pdsFor(name, S.day).map(function (p) { return toMin(p.end); }).filter(function (v) { return v !== null; });
+      }).filter(function (values) { return values.length; }).map(function (values) { return Math.max.apply(Math, values); });
+      const allClosed = sectionEnds.length && sectionEnds.every(function (end) { return nowMin() >= end; });
+      return { t: allClosed ? 'School closed' : 'Section closed', warn: false };
+    }
     const cp = currentPeriodFor(sec), exp = scheduledFor(sec, cp) || cl.length;
     let miss = 0;
     ps.forEach(function (p) { if (periodEndedFor(sec, p.n)) miss += unmarkedCount(sec, p.n); });
@@ -974,7 +1002,7 @@
       const btn = e.target.closest('[data-act]'); if (!btn) return;
       const card = btn.closest('.card'); const cls = card.dataset.cls;
       const act = btn.dataset.act;
-      if (isFrozen()) { toast('Monitoring is frozen for your account. Ask the Admin.'); return; }
+      if (isFrozen()) { toast(isMonitor() ? 'Monitoring is frozen for your account. Ask the Admin.' : 'Attendance is read-only. Only the assigned Monitor can record entries.'); return; }
       if (act === 'cover') { coverModal(cls); return; }
       if (act === 'LATE') { lateModal(cls); return; }
       if (act === 'ABS') absenceModal(cls); else mark(cls, act, '');
@@ -1011,7 +1039,7 @@
       const sig = [S.section, S.period, ymd(new Date()), pds().map(function (p) { return periodEnded(p.n) ? 1 : 0; }).join(''), pending().length, S.online].join('|');
       if (sig !== S.lastSig) { S.lastSig = sig; render(); }
       if (pending().length && navigator.onLine && !S.retryTimer) scheduleRetry();
-      if (navigator.onLine && Date.now() - (S.lastEntryRefresh || 0) > TIMINGS.refresh) {
+      if (navigator.onLine && Date.now() - (S.lastEntryRefresh || 0) > TIMINGS.sharedEntries) {
         S.lastEntryRefresh = Date.now();
         refreshSharedEntries(S.date);
       }

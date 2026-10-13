@@ -47,7 +47,7 @@
   function fail(res) {
     const code = res && res.error;
     if (code === 'auth') { B().authFailed(); showErr('Your PIN is no longer accepted. Tap the red badge at the top to sign in again.'); }
-    else if (code === 'forbidden') showErr('Only an Admin can change these settings.');
+    else if (code === 'forbidden') showErr('Your account is not permitted to make this change.');
     else if (code === 'locked') showErr('Too many wrong PINs. Try again in 10 minutes.');
     else if (code === 'busy') showErr('The system is busy with other users. Nothing was changed. Try again in a moment.');
     else if (code === 'invalid') showErr(res.detail || 'Some values are not valid.');
@@ -164,6 +164,7 @@
 
   function menu() {
     const d = A.data, token = ++A.menuToken;
+    const principal = B().S.user && B().S.user.role === 'Admin';
     A.view = 'menu';
     g.Core.metaGet('adminQueue').then(function (queued) {
       if (token !== A.menuToken || A.view !== 'menu') return;
@@ -178,11 +179,14 @@
       ['teachers', 'Teachers', d.teachers.length + ' teachers'],
       ['periods', 'Bell times', d.periods.length + ' rows'],
       ['terms', 'Terms', (d.terms || []).length + ' terms'],
+      ['holidays', 'Holidays', (d.holidays || []).length + ' named date ranges'],
       ['timetable', 'Timetable', d.timetable.length + ' lessons'],
-      ['users', 'Users & PINs', d.users.length + ' users'],
-      ['devices', 'Devices', 'Manage synced phones'],
       ['queued', 'Queued changes (' + q.length + ')', q.length ? 'Saved offline' : 'No pending saves'],
     ];
+    if (principal) {
+      items.push(['users', 'Users & PINs', (d.users || []).length + ' users']);
+      items.push(['devices', 'Devices', 'Manage synced phones']);
+    }
     box().innerHTML = '<p class="ahint">Changes reach the monitor\'s phone the next time it opens the app with internet.</p><div class="amenu">' +
       items.map(function (m) {
         return '<button class="amrow" data-v="' + m[0] + '"><b>' + esc(m[1]) + '</b><span class="muted">' + esc(m[2]) + '</span></button>';
@@ -204,6 +208,7 @@
     else if (view === 'teachers') teachers();
     else if (view === 'periods') periods();
     else if (view === 'terms') terms();
+    else if (view === 'holidays') holidays();
     else if (view === 'records') records();
     else if (view === 'timetable') timetable();
     else if (view === 'users') users();
@@ -451,6 +456,55 @@
     draw();
   }
 
+  /* ───────── holidays ───────── */
+
+  function holidays() {
+    const terms = A.data.terms || [];
+    const rows = (A.data.holidays || []).map(function (h) { return { term: h.term, name: h.name, start: h.start, end: h.end }; });
+    function draw() {
+      if (!terms.length) {
+        box().innerHTML = head('Holidays') + note('Add at least one term before entering holidays.');
+        wireBack();
+        return;
+      }
+      box().innerHTML = head('Holidays', 'Add each named holiday or school break as a date range within its term. Use the same start and end date for a single-day holiday.') +
+        '<div class="alist">' + rows.map(function (r, i) {
+          return '<div class="erow wrap"><select data-i="' + i + '" data-f="term">' + terms.map(function (t) { return '<option' + sel(t.name, r.term) + '>' + esc(t.name) + '</option>'; }).join('') + '</select>' +
+            '<input type="text" class="nm" data-i="' + i + '" data-f="name" maxlength="80" placeholder="e.g. Eid al-Fitr" value="' + esc(r.name) + '">' +
+            '<input type="date" data-i="' + i + '" data-f="start" value="' + esc(r.start) + '">' +
+            '<span class="muted">to</span><input type="date" data-i="' + i + '" data-f="end" value="' + esc(r.end) + '">' +
+            '<button class="x del" data-del="' + i + '" aria-label="Delete">✕</button></div>';
+        }).join('') + '</div><button id="aAdd" class="addbtn">+ Add holiday</button>' +
+        '<div class="row-btns"><button id="aSave" class="primary">Save</button></div>';
+      wireBack();
+      box().querySelectorAll('[data-f]').forEach(function (inp) {
+        const upd = function () { rows[+inp.dataset.i][inp.dataset.f] = inp.value; A.dirty = true; };
+        inp.addEventListener('input', upd); inp.addEventListener('change', upd);
+      });
+      box().querySelectorAll('[data-del]').forEach(function (b) {
+        b.onclick = function () { rows.splice(+b.dataset.del, 1); A.dirty = true; draw(); };
+      });
+      $('#aAdd').onclick = function () { rows.push({ term: terms[0].name, name: '', start: '', end: '' }); A.dirty = true; draw(); };
+      $('#aSave').onclick = async function () {
+        const out = [];
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          if (!r.name && !r.start && !r.end) continue;
+          if (!r.name.trim() || !r.start || !r.end) { showErr('Each holiday needs a name and a start/end date.'); return; }
+          if (r.end < r.start) { showErr(r.name + ': the end date is before the start date.'); return; }
+          const term = terms.find(function (t) { return t.name === r.term; });
+          if (!term || r.start < term.start || r.end > term.end) { showErr(r.name + ': dates must fall inside the selected term.'); return; }
+          for (let j = 0; j < i; j++) {
+            if (rows[j].term === r.term && r.start <= rows[j].end && r.end >= rows[j].start) { showErr(r.name + ' overlaps another holiday in ' + r.term + '.'); return; }
+          }
+          out.push([r.term, r.name.trim(), r.start, r.end]);
+        }
+        if (await save({ table: 'Holidays', rows: out })) holidays();
+      };
+    }
+    draw();
+  }
+
   /* ───────── timetable ───────── */
 
   function timetable() {
@@ -568,12 +622,12 @@
     const rows = A.data.users.map(function (u) { return { name: u[0], pin: u[1], role: u[2], active: u[3], frozen: !!u[4], me: u[1] === myPin, origPin: u[1] }; });
 
     function draw() {
-      box().innerHTML = head('Users & PINs', 'Give each person their own PIN (6 to 12 digits). A Monitor can record entries; an Admin can also change these settings. Switch Active off to block someone without deleting. Tick Frozen to stop a Monitor from recording: they can still sign in and view reports, but new entries are refused (entries recorded before the freeze are kept). You cannot change your own role or switch yourself off. Keep the Admin PIN private.') +
+      box().innerHTML = head('Users & PINs', 'Keep exactly one active Monitor and one active Admin (the Principal). Sub-admins can view/download records and manage configuration, but cannot record attendance, manage users/devices, or clear data. Give each person a unique PIN (6 to 12 digits).') +
         '<div class="alist">' + rows.map(function (r, i) {
           return '<div class="erow wrap urow"><input type="text" data-i="' + i + '" data-f="name" maxlength="40" placeholder="Name" value="' + esc(r.name) + '">' +
             '<input type="text" inputmode="numeric" class="pin" data-i="' + i + '" data-f="pin" maxlength="12" placeholder="PIN" value="' + esc(r.pin) + '">' +
             '<button class="x" data-gen="' + i + '" aria-label="New random PIN">🎲</button>' +
-            '<select data-i="' + i + '" data-f="role"' + (r.me ? ' disabled' : '') + '><option' + sel('Monitor', r.role) + '>Monitor</option><option' + sel('Admin', r.role) + '>Admin</option></select>' +
+            '<select data-i="' + i + '" data-f="role"' + (r.me ? ' disabled' : '') + '><option' + sel('Monitor', r.role) + '>Monitor</option><option' + sel('Admin', r.role) + '>Admin</option><option' + sel('Sub-admin', r.role) + '>Sub-admin</option></select>' +
             '<label class="chkl"><input type="checkbox" data-i="' + i + '" data-f="active"' + (r.active ? ' checked' : '') + (r.me ? ' disabled' : '') + '> Active</label>' +
             (r.role === 'Monitor' && !r.me ? '<label class="chkl frz"><input type="checkbox" data-i="' + i + '" data-f="frozen"' + (r.frozen ? ' checked' : '') + '> Frozen</label>' : '') +
             (r.me ? '<span class="muted">(you)</span>' : '<button class="x del" data-del="' + i + '" aria-label="Delete">✕</button>') + '</div>';
@@ -595,7 +649,7 @@
       $('#aAdd').onclick = function () { rows.push({ name: '', pin: randPin(), role: 'Monitor', active: true, me: false, origPin: '' }); A.dirty = true; draw(); };
       $('#aSave').onclick = async function () {
         const pins = {};
-        let admins = 0;
+        let admins = 0, monitors = 0;
         for (let i = 0; i < rows.length; i++) {
           const r = rows[i], name = r.name.trim(), pin = r.pin.trim();
           if (!name) { showErr('Every user needs a name.'); return; }
@@ -603,8 +657,10 @@
           if (pins[pin]) { showErr('Two users have the same PIN (' + name + ').'); return; }
           pins[pin] = 1;
           if (r.role === 'Admin' && r.active) admins++;
+          if (r.role === 'Monitor' && r.active) monitors++;
         }
-        if (!admins) { showErr('Keep at least one active Admin.'); return; }
+        if (admins !== 1) { showErr('Keep exactly one active Admin (the Principal).'); return; }
+        if (monitors !== 1) { showErr('Keep exactly one active Monitor. Set other staff to Sub-admin.'); return; }
         const me = rows.filter(function (r) { return r.me; })[0];
         const out = rows.map(function (r) { return [r.name.trim(), r.pin.trim(), r.role, !!r.active, r.role === 'Monitor' && !!r.frozen]; });
         if (await save({ table: 'Users', rows: out })) {
