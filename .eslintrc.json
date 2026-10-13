@@ -1,0 +1,17 @@
+{
+  "env": { "browser": true, "es2021": true },
+  "extends": "eslint:recommended",
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "error",
+    "eqeqeq": "error",
+    "prefer-const": "warn",
+    "no-var": "error"
+  },
+  "globals": {
+    "Core": "readonly", "importScripts": "readonly",
+    "SpreadsheetApp": "readonly", "DriveApp": "readonly", "CacheService": "readonly",
+    "LockService": "readonly", "Utilities": "readonly", "Session": "readonly",
+    "ScriptApp": "readonly", "ContentService": "readonly", "Logger": "readonly", "PropertiesService": "readonly"
+  }
+}
