@@ -123,11 +123,11 @@
       try {
         res = await api('sync', { entries: payload, device: device });
       } catch (err) {
-        return { ok: false, error: 'network', saved: saved, rejected: rejected };
+        return { ok: false, error: 'network', detail: err && err.message ? err.message : String(err), saved: saved, rejected: rejected };
       }
       if (!res || !res.ok) {
         if (res && (res.error === 'auth' || res.error === 'revoked')) await metaSet('authBad', 1);
-        return { ok: false, error: (res && res.error) || 'server', saved: saved, rejected: rejected, serverNow: res && res.serverNow, serverDate: res && res.serverDate };
+        return { ok: false, error: (res && res.error) || 'server', detail: res && res.detail, saved: saved, rejected: rejected, serverNow: res && res.serverNow, serverDate: res && res.serverDate };
       }
 
       serverNow = res.serverNow || serverNow;

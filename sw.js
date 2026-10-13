@@ -1,5 +1,5 @@
 /* Service worker: makes the app open offline, and syncs queued entries when signal returns. */
-const CACHE = 'class-entry-v12';   // bump this number when you change app files
+const CACHE = 'class-entry-v13';   // bump this number when you change app files
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'admin.js', 'reports.js', 'clashes.js', 'pdf-report.js', 'core.js', 'config.js', 'logo.png', 'lib/jspdf.umd.min.js', 'lib/jspdf.plugin.autotable.min.js',
                'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png'];
 

@@ -21,7 +21,7 @@
   const S = {
     cfg: null, user: null, all: [], entries: new Map(), tt: new Map(), teachers: new Map(),
     date: '', day: '', section: '', period: 1, manual: false, unmarkedOnly: false, tab: 'entry',
-    online: navigator.onLine !== false, syncTimer: null, retryTimer: null, retryStep: 0, installEvt: null, authBad: false, skew: 0, dateOff: false, pendingExtra: {},
+    online: navigator.onLine !== false, syncTimer: null, retryTimer: null, retryStep: 0, installEvt: null, authBad: false, skew: 0, dateOff: false, pendingExtra: {}, lastSyncError: null,
   };
   let entryRenderKey = '';
   let pendingDate = '';
@@ -695,8 +695,10 @@
     S.online = true;
     renderBadge();
     let r;
-    try { r = await Core.syncNow(); } catch (e) { r = { ok: false, error: 'network' }; }
+    try { r = await Core.syncNow(); } catch (e) { r = { ok: false, error: 'network', detail: e && e.message ? e.message : String(e) }; }
     await reloadEntries();
+    S.lastSyncError = r.ok ? null : { error: r.error || (r.rejected ? 'rejected' : 'unknown'), detail: r.detail || '' };
+    Core.metaSet('lastSyncError', S.lastSyncError).catch(function (e) { console.warn('Could not save sync diagnostics.', e); });
     if (r.error === 'auth' || r.error === 'no_login' || r.error === 'revoked') S.authBad = true;
     else if (r.ok) { S.authBad = false; S.retryStep = 0; clearTimeout(S.retryTimer); }
     if (r.serverNow) checkClock({ skewMs: Date.now() - Date.parse(r.serverNow), serverDate: r.serverDate });
@@ -716,7 +718,7 @@
         const reason = rejectedRows[0] && rejectedRows[0].err;
         toast(reason === 'section_not_configured' ? 'Bell times are not set up for your section. Ask the Admin.' : r.rejected + ' entries were rejected — see Sync panel');
       }
-      else toast('Could not sync — will retry. Entries are safe on this phone.');
+      else toast('Could not sync — will retry. Open Sync & settings for details.');
     }
   }
 
@@ -742,15 +744,17 @@
   }
 
   function syncPanel() {
-    Promise.all([Core.metaGet('lastSync'), Core.metaGet('configAt')]).then(function (v) {
+    Promise.all([Core.metaGet('lastSync'), Core.metaGet('configAt'), Core.metaGet('lastSyncError')]).then(function (v) {
       const n = pending().length;
       const errs = rejected();
+      const syncError = S.lastSyncError || v[2];
       const fmt = function (iso) { return iso ? new Date(iso).toLocaleString() : 'never'; };
       openModal('<h2>Sync &amp; settings</h2><div class="kv">' +
         '<span>Not synced</span><span><b>' + n + '</b> entries</span>' +
         '<span>Last sync</span><span>' + esc(fmt(v[0])) + '</span>' +
         '<span>Timetable</span><span>v' + esc(S.cfg.version || '?') + ' · ' + esc(fmt(v[1])) + '</span>' +
         '<span>Connection</span><span>' + (navigator.onLine ? 'Online' : 'Offline') + '</span></div>' +
+        (syncError ? '<div class="errlist">Last sync error (' + esc(syncError.error || 'unknown') + '): ' + esc((syncError.detail || 'No additional server detail was returned.').slice(0, 400)) + '</div>' : '') +
         (errs.length ? '<div class="errlist">Rejected: ' + errs.slice(0, 5).map(function (e) { const reasons = { section_not_configured: 'Bell times are not set up for your section. Ask the Admin.' }; return esc(e.cls + ' ' + ord(e.period) + ' (' + (reasons[e.err] || e.err) + ')'); }).join(', ') + '</div>' : '') +
         '<div class="row-btns"><button id="pSync" class="primary">Sync now</button></div>' +
         (errs.length ? '<div class="row-btns"><button id="pRetry">Retry rejected</button><button id="pDisc">Discard rejected</button></div>' : '') +
