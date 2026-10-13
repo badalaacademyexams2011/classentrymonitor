@@ -3,40 +3,56 @@
 
   const $ = function (s) { return document.querySelector(s); };
   const esc = function (s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   };
   const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const DEBUG = false;
+  const TIMINGS = { syncDebounce: 2500, retry: [5000, 15000, 45000, 120000], refresh: 180000, tick: 60000, undo: 4000, toast: 2600 };
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const ord = function (n) { const v = n % 100; return v >= 11 && v <= 13 ? n + 'th' : n + (({ 1: 'st', 2: 'nd', 3: 'rd' })[n % 10] || 'th'); };
   const pad = function (n) { return String(n).padStart(2, '0'); };
   const ymd = function (d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const shiftYmd = function (value, days) { const d = new Date(value + 'T12:00:00'); d.setDate(d.getDate() + days); return ymd(d); };
   const toMin = function (t) { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
   const nowMin = function () { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); };
 
   const S = {
     cfg: null, user: null, all: [], entries: new Map(), tt: new Map(), teachers: new Map(),
     date: '', day: '', section: '', period: 1, manual: false, unmarkedOnly: false, tab: 'entry',
-    online: navigator.onLine !== false, syncTimer: null, installEvt: null, authBad: false, skew: 0, dateOff: false,
+    online: navigator.onLine !== false, syncTimer: null, retryTimer: null, retryStep: 0, installEvt: null, authBad: false, skew: 0, dateOff: false, pendingExtra: {},
   };
+  let entryRenderKey = '';
+  let pendingDate = '';
 
   /* ───────────── helpers ───────────── */
 
-  function toast(msg) {
+  function toast(msg, undo, persistent) {
     const t = $('#toast');
-    t.textContent = msg;
+    t.textContent = '';
+    t.appendChild(document.createTextNode(msg));
+    if (undo) { const b = document.createElement('button'); b.type = 'button'; b.className = 'link'; b.textContent = 'Undo'; b.onclick = function () { clearTimeout(toast._t); t.classList.remove('show'); undo(); }; t.appendChild(document.createTextNode(' · ')); t.appendChild(b); }
     t.classList.add('show');
     clearTimeout(toast._t);
-    toast._t = setTimeout(function () { t.classList.remove('show'); }, 2600);
+    if (!persistent) toast._t = setTimeout(function () { t.classList.remove('show'); }, undo ? TIMINGS.undo : TIMINGS.toast);
   }
 
-  function setToday() {
-    const n = new Date();
-    S.date = ymd(n);
+  function setDate(value) {
+    const parts = value.split('-').map(Number);
+    const n = new Date(parts[0], parts[1] - 1, parts[2]);
+    S.date = value;
     S.day = DAYS[n.getDay()];
     S.dateLabel = DAYS[n.getDay()] + ' ' + n.getDate() + ' ' + MONTHS[n.getMonth()] + ' ' + n.getFullYear();
   }
+
+  function setToday() {
+    const today = ymd(new Date());
+    S.currentDay = today;
+    setDate(today);
+  }
+
+  function isPastDate() { return S.date < ymd(new Date()); }
 
   function loadCfg(cfg) {
     S.cfg = cfg;
@@ -52,8 +68,10 @@
   // Tap-to-dial link for a teacher's phone number ('' when there is none).
   const telHtml = function (code) {
     const t = S.teachers.get(code), ph = t && t.phone ? String(t.phone) : '';
-    const num = ph.replace(/[^\d+]/g, '');
-    return num ? '<a class="tel" href="tel:' + esc(num) + '">\uD83D\uDCDE ' + esc(ph) + '</a>' : '';
+    const clean = ph.slice(0, 20);
+    if (!/^\+?[0-9 ()-]{7,20}$/.test(clean)) return '';
+    const num = clean.replace(/[^\d+]/g, '');
+    return num ? '<a class="tel" href="tel:' + esc(num) + '">\uD83D\uDCDE ' + esc(clean) + '</a>' : '';
   };
   const lesson = function (period, cls) { return S.tt.get(S.day + '|' + period + '|' + cls); };
   const pending = function () { return S.all.filter(function (e) { return !e.synced && !e.err; }); };
@@ -90,6 +108,12 @@
     const days = new Set(((S.cfg && S.cfg.timetable) || []).map(function (r) { return r[0]; }));
     return days.size > 0 && !days.has(S.day);
   }
+  function noSchoolReason() {
+    const sd = S.cfg && S.cfg.days;
+    if (sd && sd.length && sd.indexOf(S.day) < 0) return { reason: 'holiday', day: S.day };
+    const days = new Set(((S.cfg && S.cfg.timetable) || []).map(function (r) { return r[0]; }));
+    return { reason: days.size && !days.has(S.day) ? 'no_timetable' : 'unset', day: S.day };
+  }
   function periodLenFor(sec, n) { const r = bellRange(sec, S.day, n); return r ? r.e - r.s : 40; }
 
   function currentPeriodFor(sec) {
@@ -102,9 +126,13 @@
     return next ? next.n : ps[ps.length - 1].n;
   }
   const currentPeriod = function () { return currentPeriodFor(S.section); };
+  function firstPeriod() {
+    const periods = pds().slice().sort(function (a, b) { return a.n - b.n; });
+    return periods.length ? periods[0].n : 1;
+  }
 
   function periodEndedFor(sec, n) { const r = bellRange(sec, S.day, n); return !!r && nowMin() >= r.e; }
-  const periodEnded = function (n) { return periodEndedFor(S.section, n); };
+  const periodEnded = function (n) { return isPastDate() || periodEndedFor(S.section, n); };
 
   // Another-section lesson of this teacher that is still running when this lesson starts (null if none).
   function heldBy(code, cls, period) {
@@ -132,14 +160,24 @@
 
   function render() {
     const d = ymd(new Date());
-    if (d !== S.date) { setToday(); S.manual = false; reloadEntries().then(function () { S.period = currentPeriod(); render(); }); return; }
+    if (d !== S.currentDay) {
+      S.currentDay = d;
+      setDate(d);
+      S.manual = false;
+      reloadEntries().then(function () { S.period = currentPeriod(); render(); });
+      return;
+    }
     if (!ensureSection()) { renderPicker(); return; }
     $('#picker').hidden = true; $('#main').hidden = false;
     if (S.tab === 'admin' && !(S.user && S.user.role === 'Admin')) S.tab = 'entry';
-    if (S.tab === 'reports' && !(S.user && S.user.role === 'Admin')) S.tab = 'entry';
+    if ((S.tab === 'reports' || S.tab === 'clashes') && !S.user) S.tab = 'entry';
     $('#adminTab').hidden = !(S.user && S.user.role === 'Admin');
-    $('#reportsTab').hidden = !(S.user && S.user.role === 'Admin');
+    $('#reportsTab').hidden = !S.user;
     $('#hdrDate').textContent = S.dateLabel;
+    $('#entryDate').value = S.date;
+    $('#entryDate').min = shiftYmd(d, -7);
+    $('#entryDate').max = d;
+    $('#pastEntryWarn').hidden = !isPastDate();
     $('#hdrUser').textContent = (S.cfg.school || 'School') + ' · ' + (S.user ? S.user.name : '');
     const sb = $('#secBtn');
     sb.hidden = sections().length < 2;
@@ -151,7 +189,34 @@
     $('#todayView').hidden = S.tab !== 'today';
     $('#adminView').hidden = S.tab !== 'admin';
     $('#reportsView').hidden = S.tab !== 'reports';
+    $('#clashesView').hidden = S.tab !== 'clashes';
+    renderFrozen();
     if (S.tab === 'entry') renderEntry(); else if (S.tab === 'today') renderToday();
+  }
+
+  function applyEntryDate(date) {
+    pendingDate = '';
+    setDate(date);
+    S.manual = true;
+    S.period = isPastDate() ? firstPeriod() : currentPeriod();
+    S.entries = new Map(S.all.filter(function (e) { return e.date === S.date; }).map(function (e) { return [e.key, e]; }));
+    entryRenderKey = '';
+    render();
+  }
+
+  function chooseEntryDate(date) {
+    const today = ymd(new Date());
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date < shiftYmd(today, -7) || date > today) {
+      render();
+      toast('Choose a date from today back through the last 7 days');
+      return;
+    }
+    if (date >= today) { applyEntryDate(date); return; }
+    pendingDate = date;
+    openModal('<h2>Correcting a past entry</h2><div class="muted">You are viewing ' + esc(date) + '. Changes will update that day’s saved class entries and sync to the school records. Please check the date and period before saving.</div>' +
+      '<div class="row-btns"><button id="pastDateCancel">Cancel</button><button id="pastDateContinue" class="primary">Continue</button></div>');
+    $('#pastDateCancel').onclick = function () { pendingDate = ''; closeModal(); render(); };
+    $('#pastDateContinue').onclick = function () { const selected = pendingDate; closeModal(); applyEntryDate(selected); };
   }
 
   function renderBadge() { renderBadgeInto($('#syncBadge')); if (!$('#picker').hidden) renderBadgeInto($('#pkBadge')); }
@@ -167,9 +232,11 @@
 
   function renderEntry() {
     if (noSchool()) {
+      entryRenderKey = '';
       $('#periodBar').innerHTML = '';
       $('#periodInfo').textContent = 'No school today';
-      $('#list').innerHTML = '<div class="empty">No lessons are timetabled for ' + esc(S.day) + '.</div>';
+      const why = noSchoolReason();
+      $('#list').innerHTML = '<div class="empty">' + (why.reason === 'holiday' ? (isPastDate() ? 'The selected date (' : 'Today (') + esc(why.day) + ') is not a school day.' : 'No lessons are timetabled for ' + esc(why.day) + '.') + '</div>';
       return;
     }
     const periods = (pds().length ? pds() : [1, 2, 3, 4, 5, 6, 7, 8].map(function (n) { return { n: n }; }));
@@ -182,24 +249,27 @@
     $('#periodInfo').textContent = ord(S.period) + ' period' + (cp && cp.start ? ' · ' + cp.start + '–' + cp.end : '');
     $('#unmarkedOnly').checked = S.unmarkedOnly;
 
-    const past = periodEnded(S.period);
+    const past = isPastDate() || periodEnded(S.period);
     const classes = classesOf(S.section);
     // classes with no lesson in this period (e.g. lower primary after they close) are hidden, unless nothing is timetabled at all
     const anyLesson = classes.some(function (c) { return !!lesson(S.period, c); });
     const hiddenN = anyLesson ? classes.filter(function (c) { return !lesson(S.period, c) && !S.entries.get(S.date + '|' + S.period + '|' + c); }).length : 0;
-    let html = '';
+    const visible = [];
     classes.forEach(function (cls) {
       const key = S.date + '|' + S.period + '|' + cls;
       const e = S.entries.get(key);
       if (S.unmarkedOnly && e) return;
       if (anyLesson && !e && !lesson(S.period, cls)) return;
-      const l = lesson(S.period, cls);
+      visible.push(cls);
+    });
+    const renderCard = function (cls) {
+      const key = S.date + '|' + S.period + '|' + cls, e = S.entries.get(key), l = lesson(S.period, cls);
       const teacher = e && e.teacher !== undefined && e.teacher !== '' ? e.teacher : (l ? l.teacher : '');
       const subject = e && e.subject ? e.subject : (l ? l.subject : '');
       const st = e ? e.status : '';
       const lateLabel = st === 'LATE' ? 'Late ' + e.mins : 'Late';
       const effT = e && e.cover ? e.cover : teacher;
-      html += '<div class="card ' + (st ? 's-' + st : 'unmarked' + (past ? ' past' : '')) + '" data-cls="' + esc(cls) + '">' +
+      return '<div id="card-' + encodeURIComponent(cls).replace(/%/g, '_') + '" tabindex="0" class="card ' + (st ? 's-' + st : 'unmarked' + (past ? ' past' : '')) + '" data-cls="' + esc(cls) + '">' +
         '<div class="row1"><b class="cls">' + esc(cls) + '</b><span class="subj">' + esc(subject || (l ? '' : '— not in timetable —')) + '</span></div>' +
         '<div class="teach"><span>' + esc(tName(teacher) || 'No teacher set') + '</span>' + telHtml(teacher) +
         (e && e.cover ? '<span class="cov">Cover: ' + esc(tName(e.cover)) + '</span>' + telHtml(e.cover) : '') + holdNote(S.period, cls, effT) +
@@ -210,9 +280,36 @@
         '<button class="b abs' + (st === 'ABS' ? ' on' : '') + '" data-act="ABS" aria-label="Absent">A</button>' +
         '<button class="b none' + (st === 'NONE' ? ' on' : '') + '" data-act="NONE" aria-label="No lesson">X</button>' +
         '</div></div>';
+    };
+    const empty = !visible.length ? '<div class="empty">' + (classes.length ? 'All classes marked for this period ✓' : 'No classes in this section. Ask the Admin to add them.') + '</div>' : '';
+    const hiddenNote = hiddenN && visible.length ? '<div class="muted note">' + hiddenN + (hiddenN === 1 ? ' class has' : ' classes have') + ' no lesson in this period.</div>' : '';
+    const key = [S.section, S.period, visible.join('\u0000'), hiddenN, empty].join('|');
+    const host = $('#list');
+    if (entryRenderKey !== key || !host.querySelector('.card') && visible.length) {
+      host.innerHTML = visible.map(renderCard).join('') || empty;
+      if (hiddenNote) host.insertAdjacentHTML('beforeend', hiddenNote);
+      entryRenderKey = key;
+      return;
+    }
+    visible.forEach(function (cls) {
+      const oldCard = document.getElementById('card-' + encodeURIComponent(cls).replace(/%/g, '_'));
+      if (!oldCard) { entryRenderKey = ''; renderEntry(); return; }
+      const holder = document.createElement('div');
+      holder.innerHTML = renderCard(cls);
+      const fresh = holder.firstElementChild;
+      oldCard.className = fresh.className;
+      const oldTeacher = oldCard.querySelector('.teach'), newTeacher = fresh.querySelector('.teach');
+      if (oldTeacher.innerHTML !== newTeacher.innerHTML) oldTeacher.innerHTML = newTeacher.innerHTML;
+      ['OT', 'LATE', 'ABS', 'NONE'].forEach(function (act) {
+        const oldButton = oldCard.querySelector('[data-act="' + act + '"]');
+        const newButton = fresh.querySelector('[data-act="' + act + '"]');
+        oldButton.className = newButton.className;
+        oldButton.textContent = newButton.textContent;
+      });
     });
-    $('#list').innerHTML = (html || '<div class="empty">' + (classes.length ? 'All classes marked for this period ✓' : 'No classes in this section. Ask the Admin to add them.') + '</div>') +
-      (hiddenN && html ? '<div class="muted note">' + hiddenN + (hiddenN === 1 ? ' class has' : ' classes have') + ' no lesson in this period.</div>' : '');
+    const note = host.querySelector('.note');
+    if (hiddenNote && !note) host.insertAdjacentHTML('beforeend', hiddenNote);
+    else if (!hiddenNote && note) note.remove();
   }
 
   function scheduledFor(sec, period) {
@@ -253,7 +350,8 @@
         '<td>' + pe.filter(function (e) { return e.status === 'ABS'; }).length + '</td></tr>';
     });
     h += '</table><p class="muted" style="font-size:.8rem">Tap a period to open it. ⚠ = period ended with classes still unmarked.</p>' +
-      '<button id="tdPdf" class="addbtn">Download today\'s report (PDF)</button>';
+      '<button id="tdPdf" class="addbtn">Download today\'s report (PDF)</button>' +
+      (noSchool() ? '' : '<button id="tdPrint" class="addbtn">Print roster</button>');
     $('#todayView').innerHTML = h;
   }
 
@@ -317,7 +415,12 @@
     ents.forEach(function (e) {
       const sec = secOf(e.cls), eff = e.cover || e.teacher, mins = e.status === 'LATE' ? Number(e.mins) || 0 : 0;
       let st = e.status, held = null;
-      if (e.status === 'LATE') { held = heldBy(eff, e.cls, e.period); if (held && excuseOn && mins <= held.mins + 5) st = 'OT'; }
+      if (e.status === 'LATE') {
+        held = e.heldMins !== '' && e.heldMins !== null && e.heldMins !== undefined
+          ? (Number(e.heldMins) > 0 ? { c: '', p: 0, e: 0, mins: Number(e.heldMins), label: e.heldIn || '' } : null)
+          : heldBy(eff, e.cls, e.period);
+        if (held && excuseOn && mins <= held.mins + 5) st = 'OT';
+      }
       const lost = st === 'ABS' ? periodLenFor(sec, e.period) : 0;
       if (st === 'ABS') absLens[lost] = (absLens[lost] || 0) + 1;
       add(T, st, mins, lost); add(bucket(cls, e.cls), st, mins, lost); add(bucket(per, e.period), st, mins, lost);
@@ -328,7 +431,7 @@
       if (e.status === 'LATE' || e.status === 'ABS' || e.cover) {
         exc.push({ type: wasHeld ? 'HELD' : e.status === 'LATE' ? 'LATE' : e.status === 'ABS' ? 'ABS' : 'COVER', date: S.date, day: S.day, period: e.period, cls: e.cls,
                    subject: e.subject || '', section: sec, teacher: eff, name: tName(eff), mins: mins, cover: !!e.cover, scheduled: e.teacher || '',
-                   scheduledName: tName(e.teacher), heldIn: held ? held.c + ' ' + ord(held.p) + ' period until ' + fmtMin(held.e) : '', heldMins: held ? held.mins : 0 });
+                   scheduledName: tName(e.teacher), heldIn: held ? (held.label || held.c + ' ' + ord(held.p) + ' period until ' + fmtMin(held.e)) : '', heldMins: held ? held.mins : 0, note: e.note || '' });
       }
     });
     fin(T);
@@ -351,7 +454,7 @@
     closeModal();
     if (!window.Reports || !window.Reports.pdfToday) { toast('PDF tool not loaded. Refresh the app and try again.'); return; }
     if (!S.entries.size) { toast('Nothing recorded today yet'); return; }
-    toast('Preparing PDF…');
+    toast('Preparing PDF…', null, true);
     try {
       await window.Reports.pdfToday({
         data: todayData(), mode: 'day', title: 'Daily Class Entry Report', label: S.dateLabel + (sections().length > 1 ? ' · all sections' : ''),
@@ -360,6 +463,38 @@
       });
       toast('PDF saved to your downloads ✓');
     } catch (e) { toast('Could not create the PDF: ' + (e && e.message ? e.message : 'unknown error') + '. It needs the app to have been opened online once.'); }
+  }
+
+  function rosterHtml() {
+    const periods = pds(), classes = classesOf(S.section);
+    return '<h1>' + esc(S.cfg.school || 'School') + '</h1><p>' + esc(S.dateLabel) + ' · ' + esc(S.section) + '</p>' +
+      '<table><thead><tr><th>Class</th>' + periods.map(function (p) { return '<th>' + ord(p.n) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      classes.map(function (cls) { return '<tr><th>' + esc(cls) + '</th>' + periods.map(function () { return '<td>&nbsp;</td>'; }).join('') + '</tr>'; }).join('') +
+      '</tbody></table><p class="monitor">Monitor: ' + esc(S.user ? S.user.name : '') + '</p>';
+  }
+
+  function printRoster() {
+    const content = rosterHtml();
+    const printWindow = window.open('', '_blank');
+    const style = '<style>body{font:14px Arial,sans-serif;padding:24px;color:#111}h1{margin:0 0 6px;color:#1b6e4a}p{margin:0 0 18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #555;padding:12px;text-align:center}td{height:42px}.monitor{margin-top:24px;border-top:1px solid #555;padding-top:10px}@media print{body{padding:0}}</style>';
+    if (printWindow) {
+      printWindow.document.open();
+      printWindow.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Today\'s roster</title>' + style + '</head><body>' + content + '</body></html>');
+      printWindow.document.close();
+      printWindow.focus();
+      setTimeout(function () { printWindow.print(); }, 200);
+      return;
+    }
+    let roster = document.getElementById('rosterPrint');
+    if (!roster) { roster = document.createElement('section'); roster.id = 'rosterPrint'; document.body.appendChild(roster); }
+    roster.innerHTML = content;
+    document.body.classList.add('print-roster');
+    window.addEventListener('afterprint', function cleanup() {
+      window.removeEventListener('afterprint', cleanup);
+      document.body.classList.remove('print-roster');
+      roster.remove();
+    });
+    window.print();
   }
 
   /* ───────────── marking ───────────── */
@@ -374,15 +509,22 @@
       teacher: prev.teacher !== undefined && prev.teacher !== '' ? prev.teacher : (l.teacher || ''),
       cover: prev.cover || '',
       status: status, mins: status === 'LATE' ? mins : '',
-      recordedAt: new Date().toISOString(), recordedBy: S.user ? S.user.name : '', synced: 0,
+      note: status === 'ABS' ? (prev.note || '') : '',
+      recordedAt: new Date().toISOString(), recordedBy: S.user ? S.user.name : '', synced: 0, rev: (prev.rev || 0) + 1,
     };
     if (extra) Object.assign(e, extra);
-    const px = S.pendingExtra && S.pendingExtra[key];
+    const px = S.pendingExtra[key];
     if (px) { Object.assign(e, px); delete S.pendingExtra[key]; }
+    if (status === 'LATE') {
+      const held = heldBy(e.cover || e.teacher, cls, S.period);
+      e.heldMins = held ? held.mins : 0;
+      e.heldIn = held ? held.c + ' ' + ord(held.p) + ' period until ' + fmtMin(held.e) : '';
+    }
     await Core.entryPut(e);
     S.entries.set(key, e);
     S.all = S.all.filter(function (x) { return x.key !== key; }).concat([e]);
     render();
+    toast('Saved', async function () { if (prev && prev.key) await Core.entryPut(prev); else await Core.entryDel(key); await reloadEntries(); render(); });
     scheduleSync();
     regBackgroundSync();
   }
@@ -406,6 +548,15 @@
     $('#sheet').querySelectorAll('.chips button').forEach(function (b) { b.onclick = function () { save(b.dataset.m); }; });
     $('#mSave').onclick = function () { save($('#minsIn').value); };
     $('#mCancel').onclick = closeModal;
+    $('#minsIn').onkeydown = function (e) { if (e.key === 'Enter') save($('#minsIn').value); else if (e.key === 'Escape') closeModal(); };
+  }
+
+  function absenceModal(cls) {
+    const prev = S.entries.get(S.date + '|' + S.period + '|' + cls);
+    openModal('<h2>' + esc(cls) + ' — absence reason</h2><div class="muted">Optional; up to 120 characters.</div><input id="noteIn" maxlength="120" type="text" placeholder="Reason (optional)" value="' + esc(prev && prev.note || '') + '"><div class="row-btns"><button id="mCancel">Cancel</button><button id="mSave" class="primary">Save</button></div>');
+    const save = function () { const note = $('#noteIn').value.trim(); closeModal(); mark(cls, 'ABS', '', { note: note }); };
+    $('#mSave').onclick = save; $('#mCancel').onclick = closeModal;
+    $('#noteIn').onkeydown = function (e) { if (e.key === 'Enter') save(); else if (e.key === 'Escape') closeModal(); };
   }
 
   function coverModal(cls) {
@@ -433,6 +584,7 @@
     draw('');
     $('#tq').oninput = function () { draw($('#tq').value); };
     $('#mCancel').onclick = closeModal;
+    $('#tq').onkeydown = function (e) { if (e.key === 'Escape') closeModal(); };
     if ($('#rmCover')) $('#rmCover').onclick = function () { closeModal(); applyTeacher(cls, scheduled, ''); };
   }
 
@@ -444,7 +596,6 @@
     else {
       // no status yet: remember the choice, but mark as on time only when the monitor taps a status.
       toast('Now tap a status for ' + cls + ' to save the ' + (scheduled ? 'cover' : 'teacher'));
-      S.pendingExtra = S.pendingExtra || {};
       S.pendingExtra[key] = extra;
     }
   }
@@ -459,6 +610,13 @@
     S.dateOff = !!res.serverDate && res.serverDate !== ymd(new Date());
   }
 
+  function isFrozen() { return !!(S.user && S.user.frozen); }
+  function renderFrozen() {
+    const el = $('#frozenWarn');
+    el.hidden = !isFrozen();
+    if (isFrozen()) el.textContent = '⛔ Monitoring is frozen for your account by the Admin. You can view reports and clashes, but new entries are not accepted.';
+  }
+
   function renderClock() {
     const el = $('#clockWarn');
     const m = Math.round(Math.abs(S.skew) / 60000);
@@ -470,7 +628,7 @@
   }
 
   function reauthModal() {
-    openModal('<h2>Sign in again</h2><div class="muted">The PIN saved on this phone is no longer accepted. Your entries are safe and will sync after you sign in.</div>' +
+    openModal('<h2>Sign in again</h2><div class="muted">The PIN saved on this phone is no longer accepted, or the Admin may have revoked this phone. Your entries are safe and will sync after you sign in.</div>' +
       '<input id="rePin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN" maxlength="12">' +
       '<p id="reErr" class="err"></p>' +
       '<div class="row-btns"><button id="mCancel">Cancel</button><button id="reGo" class="primary">Sign in</button></div>');
@@ -487,7 +645,8 @@
           loadCfg(res); S.user = res.user; S.authBad = false; checkClock(res);
           closeModal(); render(); trySync(true);
         } else if (res.error === 'auth') err.textContent = 'Wrong PIN.';
-        else if (res.error === 'locked') err.textContent = 'Too many wrong PINs. Try again in 10 minutes.';
+        else if (res.error === 'locked') err.textContent = 'Too many wrong PINs for this PIN. Try again in 10 minutes.';
+        else if (res.error === 'revoked') err.textContent = 'This phone was revoked by the Admin. Ask them to restore access.';
         else err.textContent = 'Server problem (' + (res.error || 'unknown') + ').';
       } catch (e) { err.textContent = 'Could not reach the server.'; }
     };
@@ -495,7 +654,14 @@
 
   function scheduleSync() {
     clearTimeout(S.syncTimer);
-    S.syncTimer = setTimeout(function () { trySync(false); }, 2500);
+    S.syncTimer = setTimeout(function () { trySync(false); }, TIMINGS.syncDebounce);
+  }
+
+  function scheduleRetry() {
+    clearTimeout(S.retryTimer);
+    const base = TIMINGS.retry[Math.min(S.retryStep, TIMINGS.retry.length - 1)];
+    S.retryStep++;
+    S.retryTimer = setTimeout(function () { trySync(false); }, Math.round(base * (0.8 + Math.random() * 0.4)));
   }
 
   async function trySync(manual) {
@@ -507,14 +673,25 @@
     let r;
     try { r = await Core.syncNow(); } catch (e) { r = { ok: false, error: 'network' }; }
     await reloadEntries();
-    if (r.error === 'auth' || r.error === 'no_login') S.authBad = true;
-    else if (r.ok) S.authBad = false;
+    if (r.error === 'auth' || r.error === 'no_login' || r.error === 'revoked') S.authBad = true;
+    else if (r.ok) { S.authBad = false; S.retryStep = 0; clearTimeout(S.retryTimer); }
+    if (r.serverNow) checkClock({ skewMs: Date.now() - Date.parse(r.serverNow), serverDate: r.serverDate });
+    if (r.frozen !== undefined && S.user && S.user.frozen !== r.frozen) { S.user.frozen = r.frozen; Core.metaSet('user', S.user); }
+    // the system was busy (many phones at once): try again in a few seconds
+    if (r.error === 'busy' || r.error === 'server' || r.error === 'network' || r.error === 'quota') scheduleRetry();
     render();
     if (manual) {
       if (r.ok) toast('Synced ' + r.saved + ' entries ✓');
       else if (r.error === 'auth') toast('PIN not accepted — sign in again');
-      else if (r.error === 'locked') toast('Too many wrong PINs. Try again in 10 minutes.');
-      else if (r.rejected) toast(r.rejected + ' entries were rejected — see Sync panel');
+      else if (r.error === 'locked') toast('Too many wrong PINs for this PIN. Try again in 10 minutes.');
+      else if (r.error === 'quota') toast('The school records service is at its limit right now. Nothing was lost — try again in a minute.');
+      else if (r.error === 'revoked') toast('This phone has been revoked by the Admin. Sign in again.');
+      else if (r.error === 'busy') toast('The system is busy. Trying again in a moment.');
+      else if (r.rejected) {
+        const rejectedRows = rejected();
+        const reason = rejectedRows[0] && rejectedRows[0].err;
+        toast(reason === 'section_not_configured' ? 'Bell times are not set up for your section. Ask the Admin.' : r.rejected + ' entries were rejected — see Sync panel');
+      }
       else toast('Could not sync — will retry. Entries are safe on this phone.');
     }
   }
@@ -525,6 +702,7 @@
   }
 
   async function backgroundRefresh() {
+    S.lastRefresh = Date.now();
     if (!navigator.onLine || S.authBad) return;
     try {
       const before = S.cfg && S.cfg.version;
@@ -532,6 +710,7 @@
       if (res && res.ok) {
         S.authBad = false;
         S.user = res.user;
+        renderFrozen();
         checkClock(res); renderClock();
         if (res.version !== before) { loadCfg(res); toast('Timetable updated'); render(); }
       } else if (res && res.error === 'auth') { S.authBad = true; renderBadge(); }
@@ -548,12 +727,12 @@
         '<span>Last sync</span><span>' + esc(fmt(v[0])) + '</span>' +
         '<span>Timetable</span><span>v' + esc(S.cfg.version || '?') + ' · ' + esc(fmt(v[1])) + '</span>' +
         '<span>Connection</span><span>' + (navigator.onLine ? 'Online' : 'Offline') + '</span></div>' +
-        (errs.length ? '<div class="errlist">Rejected: ' + errs.slice(0, 5).map(function (e) { return esc(e.cls + ' ' + ord(e.period) + ' (' + e.err + ')'); }).join(', ') + '</div>' : '') +
+        (errs.length ? '<div class="errlist">Rejected: ' + errs.slice(0, 5).map(function (e) { const reasons = { section_not_configured: 'Bell times are not set up for your section. Ask the Admin.' }; return esc(e.cls + ' ' + ord(e.period) + ' (' + (reasons[e.err] || e.err) + ')'); }).join(', ') + '</div>' : '') +
         '<div class="row-btns"><button id="pSync" class="primary">Sync now</button></div>' +
         (errs.length ? '<div class="row-btns"><button id="pRetry">Retry rejected</button><button id="pDisc">Discard rejected</button></div>' : '') +
         '<div class="row-btns"><button id="pCfg">Refresh timetable</button><button id="pExp">Share backup</button></div>' +
         '<div class="row-btns"><button id="pPdf">Download today\'s PDF</button></div>' +
-        '<div class="row-btns">' + (S.installEvt ? '<button id="pInst">Install app</button>' : '') + '<button id="pOut">Sign out</button><button id="pClose">Close</button></div>');
+        '<div class="row-btns">' + (S.installEvt ? '<button id="pInst">Install app</button>' : '') + '<button id="pHow" class="link">How to install on this phone</button><button id="pOut">Sign out</button><button id="pClose">Close</button></div>');
       $('#pSync').onclick = function () { closeModal(); trySync(true); };
       if ($('#pRetry')) $('#pRetry').onclick = async function () {
         for (const e of errs) { e.err = null; await Core.entryPut(e); }
@@ -575,6 +754,7 @@
       $('#pClose').onclick = closeModal;
       $('#pOut').onclick = signOut;
       if ($('#pInst')) $('#pInst').onclick = install;
+      $('#pHow').onclick = installHelp;
     });
   }
 
@@ -585,7 +765,7 @@
     const head = 'date,period,class,subject,teacher,cover,status,minutes_late,recorded_at,synced';
     const csv = [head].concat(rows.map(function (e) {
       return [e.date, e.period, e.cls, e.subject, e.teacher, e.cover, e.status, e.mins, e.recordedAt, e.synced ? 'yes' : 'NO']
-        .map(function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }).join(',');
+        .map(function (v) { return '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"'; }).join(',');
     })).join('\n');
     const name = 'class-entry-' + S.date + '.csv';
     try {
@@ -624,7 +804,12 @@
     $('#pin').value = '';
     $('#loginErr').textContent = '';
     $('#installBtn1').hidden = !S.installEvt;
+    let how = $('#installHelp1');
+    if (!how) { how = document.createElement('button'); how.id = 'installHelp1'; how.className = 'link'; how.textContent = 'How to install on this phone'; $('#installBtn1').after(how); }
+    how.onclick = installHelp;
   }
+
+  function installHelp() { openModal('<h2>How to install</h2><p>Android Chrome: menu ⋮ → <b>Install app</b> (or Add to Home screen).</p><p>iPhone/iPad Safari: Share → <b>Add to Home Screen</b> → Add.</p><p>Desktop Chrome or Edge: use the install icon in the address bar. If no prompt appears, reload this page once.</p><div class="row-btns"><button id="mClose">Close</button></div>'); $('#mClose').onclick = closeModal; }
 
   async function doLogin() {
     const pin = $('#pin').value.trim();
@@ -639,7 +824,8 @@
         loadCfg(res); S.user = res.user; S.authBad = false; checkClock(res);
         await startMain();
       } else if (res.error === 'auth') err.textContent = 'Wrong PIN.';
-      else if (res.error === 'locked') err.textContent = 'Too many wrong PINs. Try again in 10 minutes.';
+      else if (res.error === 'locked') err.textContent = 'Too many wrong PINs for this PIN. Try again in 10 minutes.';
+      else if (res.error === 'revoked') err.textContent = 'This phone was revoked by the Admin. Ask them to restore access.';
       else err.textContent = 'Server problem (' + (res.error || 'unknown') + ').';
     } catch (e) {
       err.textContent = e && e.message === 'not_configured' ? 'App is not configured yet (config.js).' : 'Could not reach the server. Check your internet.';
@@ -685,7 +871,8 @@
 
   async function startMain() {
     setToday();
-    await Core.prune(30).catch(function () {});
+    const lastPrune = await Core.metaGet('lastPrune');
+    if (lastPrune !== S.date) await Core.prune(30).then(function () { return Core.metaSet('lastPrune', S.date); }).catch(function () {});
     await reloadEntries();
     S.section = '';   // the monitor starts on the section picker (skipped when there is only one section)
     ensureSection();
@@ -694,6 +881,7 @@
     $('#login').hidden = true;
     render();
     if (pending().length) trySync(false);
+    if (window.Admin && window.Admin.drainQueue) window.Admin.drainQueue();
   }
 
   /* ───────────── events ───────────── */
@@ -702,19 +890,27 @@
     $('#loginBtn').onclick = doLogin;
     $('#pkList').addEventListener('click', function (e) {
       const b = e.target.closest('[data-sec]'); if (!b) return;
-      S.section = b.dataset.sec; S.manual = false; S.tab = 'entry'; S.period = currentPeriod(); render();
+      S.section = b.dataset.sec; S.manual = isPastDate(); S.tab = 'entry'; S.period = isPastDate() ? firstPeriod() : currentPeriod(); render();
     });
     $('#secBtn').onclick = showPicker;
     $('#pkBadge').onclick = function () { if (S.authBad) reauthModal(); else syncPanel(); };
     $('#pin').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
     $('#installBtn1').onclick = install;
     $('#syncBadge').onclick = function () { if (S.authBad) reauthModal(); else syncPanel(); };
-    $('#modal').addEventListener('click', function (e) { if (e.target === $('#modal')) closeModal(); });
+    $('#modal').addEventListener('click', function (e) {
+      if (e.target !== $('#modal')) return;
+      const cancelPast = !!pendingDate;
+      pendingDate = '';
+      closeModal();
+      if (cancelPast) render();
+    });
+    $('#entryDate').addEventListener('change', function () { chooseEntryDate($('#entryDate').value); });
     document.querySelector('.tabs').addEventListener('click', function (e) {
       const b = e.target.closest('button'); if (!b) return;
       S.tab = b.dataset.tab; render();
       if (S.tab === 'admin' && window.Admin) window.Admin.enter();
       if (S.tab === 'reports' && window.Reports) window.Reports.render($('#reportsView'));
+      if (S.tab === 'clashes' && window.Clashes) window.Clashes.render($('#clashesView'));
     });
     $('#periodBar').addEventListener('click', function (e) {
       const b = e.target.closest('button'); if (!b) return;
@@ -723,6 +919,7 @@
     $('#unmarkedOnly').addEventListener('change', function (e) { S.unmarkedOnly = e.target.checked; renderEntry(); });
     $('#todayView').addEventListener('click', function (e) {
       if (e.target.closest('#tdPdf')) { downloadTodayPdf(); return; }
+      if (e.target.closest('#tdPrint')) { printRoster(); return; }
       const tile = e.target.closest('[data-k]'); if (tile) { showToday(tile.dataset.k); return; }
       const tr = e.target.closest('tr.go'); if (!tr) return;
       S.period = Number(tr.dataset.p); S.manual = true; S.tab = 'entry'; render();
@@ -731,12 +928,20 @@
       const btn = e.target.closest('[data-act]'); if (!btn) return;
       const card = btn.closest('.card'); const cls = card.dataset.cls;
       const act = btn.dataset.act;
+      if (isFrozen()) { toast('Monitoring is frozen for your account. Ask the Admin.'); return; }
       if (act === 'cover') { coverModal(cls); return; }
       if (act === 'LATE') { lateModal(cls); return; }
-      mark(cls, act, '');
+      if (act === 'ABS') absenceModal(cls); else mark(cls, act, '');
+    });
+    $('#list').addEventListener('keydown', function (e) {
+      if (e.target.matches('input,select,textarea') || !$('#modal').hidden) return;
+      const card = e.target.closest('.card'); if (!card) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const cards = Array.prototype.slice.call($('#list').querySelectorAll('.card')); const n = cards.indexOf(card) + (e.key === 'ArrowDown' ? 1 : -1); if (cards[n]) cards[n].focus(); return; }
+      const acts = { o: 'OT', '1': 'OT', l: 'LATE', '2': 'LATE', a: 'ABS', '3': 'ABS', x: 'NONE', '4': 'NONE' }; const act = acts[String(e.key).toLowerCase()];
+      if (!act) return; e.preventDefault(); if (act === 'LATE') lateModal(card.dataset.cls); else if (act === 'ABS') absenceModal(card.dataset.cls); else mark(card.dataset.cls, act, '');
     });
 
-    window.addEventListener('online', function () { S.online = true; renderBadge(); trySync(false); backgroundRefresh(); });
+    window.addEventListener('online', function () { S.online = true; renderBadge(); if (pending().length) scheduleRetry(); backgroundRefresh(); if (window.Admin && window.Admin.drainQueue) window.Admin.drainQueue(); });
     window.addEventListener('offline', function () { S.online = false; renderBadge(); });
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState !== 'visible' || !S.cfg) return;
@@ -758,8 +963,9 @@
       if (!$('#modal').hidden) return;      // do not redraw while a dialog is open
       const sig = [S.section, S.period, ymd(new Date()), pds().map(function (p) { return periodEnded(p.n) ? 1 : 0; }).join(''), pending().length, S.online].join('|');
       if (sig !== S.lastSig) { S.lastSig = sig; render(); }
-      if (pending().length && navigator.onLine) trySync(false);
-    }, 60000);
+      if (pending().length && navigator.onLine && !S.retryTimer) scheduleRetry();
+      if (navigator.onLine && Date.now() - (S.lastRefresh || 0) > TIMINGS.refresh) { S.lastRefresh = Date.now(); backgroundRefresh(); }   // picks up a freeze or other Admin changes
+    }, TIMINGS.tick);
   }
 
   /* ───────────── bridge for admin.js ───────────── */
@@ -775,6 +981,7 @@
     render();
   }
 
+  /** Marks the stored credentials as refused and updates the sync indicator. */
   function authFailed() {
     S.authBad = true;
     Core.metaSet('authBad', 1);
@@ -788,6 +995,7 @@
   window.App = window.AppBridge;   // reports.js uses this name
 
   async function init() {
+    if (DEBUG) console.log('Class Entry Monitor debug enabled');
     wire();
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () {});

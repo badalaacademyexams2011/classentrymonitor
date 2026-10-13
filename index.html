@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#1b6e4a">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e3d2a">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
   <link rel="apple-touch-icon" href="icon-192.png">
@@ -38,7 +39,7 @@
         <div id="pkTitle" class="date"></div>
         <div id="pkDate" class="sub"></div>
       </div>
-      <button id="pkBadge" class="badge" aria-label="Sync status"></button>
+      <button id="pkBadge" class="badge" aria-label="Sync status" aria-live="polite" aria-atomic="true"></button>
     </header>
     <div class="pkwrap">
       <h2>Choose a section</h2>
@@ -54,17 +55,21 @@
         <div id="hdrUser" class="sub"></div>
         <button id="secBtn" class="secbtn" hidden></button>
       </div>
-      <button id="syncBadge" class="badge" aria-label="Sync status"></button>
+      <button id="syncBadge" class="badge" aria-label="Sync status" aria-live="polite" aria-atomic="true"></button>
     </header>
     <div id="clockWarn" class="clockwarn" hidden></div>
+    <div id="frozenWarn" class="clockwarn frozenwarn" hidden></div>
     <nav class="tabs">
       <button data-tab="entry" class="on">Entry</button>
       <button data-tab="today">Today</button>
-      <button data-tab="reports" id="reportsTab" hidden>Reports</button>
+      <button data-tab="reports" id="reportsTab">Reports</button>
+      <button data-tab="clashes" id="clashesTab">Clashes</button>
       <button data-tab="admin" id="adminTab" hidden>Admin</button>
     </nav>
     </div>
     <div id="entryView">
+      <div class="entry-datebar"><label for="entryDate">Entry date</label><input id="entryDate" type="date" aria-describedby="pastEntryWarn"></div>
+      <div id="pastEntryWarn" class="past-entry-warn" role="status" hidden>⚠ Correcting a past day. Check the date and period before saving; changes will sync to school records.</div>
       <div id="periodBar" class="periods"></div>
       <div class="bar2">
         <span id="periodInfo"></span>
@@ -74,16 +79,18 @@
     </div>
     <div id="todayView" hidden></div>
     <div id="reportsView" hidden></div>
+    <div id="clashesView" hidden></div>
     <div id="adminView" hidden></div>
   </section>
 
   <div id="modal" class="modal" hidden><div class="sheet" id="sheet"></div></div>
-  <div id="toast" role="status"></div>
+  <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <script src="config.js"></script>
   <script src="core.js"></script>
   <script src="admin.js"></script>
   <script src="reports.js"></script>
+  <script src="clashes.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
