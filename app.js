@@ -719,6 +719,7 @@
         toast(reason === 'section_not_configured' ? 'Bell times are not set up for your section. Ask the Admin.' : r.rejected + ' entries were rejected — see Sync panel');
       }
       else toast('Could not sync — will retry. Open Sync & settings for details.');
+      if (!r.ok) syncPanel();
     }
   }
 
