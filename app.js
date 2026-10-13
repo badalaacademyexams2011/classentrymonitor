@@ -105,6 +105,19 @@
     S.entries = new Map(S.all.filter(function (e) { return e.date === S.date; }).map(function (e) { return [e.key, e]; }));
   }
 
+  async function refreshSharedEntries(date, redraw) {
+    if (!S.cfg || !S.user || !navigator.onLine) return;
+    try {
+      const result = await Core.refreshEntries(date);
+      if (result.updated && date === S.date) {
+        await reloadEntries();
+        if (redraw !== false) render();
+      }
+    } catch (error) {
+      console.warn('Could not refresh shared class entries.', error);
+    }
+  }
+
   /* ───────────── sections (Secondary / Primary / Nursery) ───────────── */
 
   const sections = function () { return (S.cfg && S.cfg.sections && S.cfg.sections.length) ? S.cfg.sections : ['']; };
@@ -226,6 +239,7 @@
     S.entries = new Map(S.all.filter(function (e) { return e.date === S.date; }).map(function (e) { return [e.key, e]; }));
     entryRenderKey = '';
     render();
+    refreshSharedEntries(date);
   }
 
   function chooseEntryDate(date) {
@@ -909,6 +923,7 @@
     S.manual = false;
     $('#login').hidden = true;
     render();
+    refreshSharedEntries(S.date);
     if (pending().length) trySync(false);
     if (window.Admin && window.Admin.drainQueue) window.Admin.drainQueue();
   }
@@ -980,6 +995,7 @@
       reloadEntries().then(function () {
         if (!S.manual) S.period = currentPeriod();
         render();
+        refreshSharedEntries(S.date);
         if (pending().length) trySync(false);
         backgroundRefresh();
       });
@@ -995,6 +1011,10 @@
       const sig = [S.section, S.period, ymd(new Date()), pds().map(function (p) { return periodEnded(p.n) ? 1 : 0; }).join(''), pending().length, S.online].join('|');
       if (sig !== S.lastSig) { S.lastSig = sig; render(); }
       if (pending().length && navigator.onLine && !S.retryTimer) scheduleRetry();
+      if (navigator.onLine && Date.now() - (S.lastEntryRefresh || 0) > TIMINGS.refresh) {
+        S.lastEntryRefresh = Date.now();
+        refreshSharedEntries(S.date);
+      }
       if (navigator.onLine && Date.now() - (S.lastRefresh || 0) > TIMINGS.refresh) { S.lastRefresh = Date.now(); backgroundRefresh(); }   // picks up a freeze or other Admin changes
     }, TIMINGS.tick);
   }

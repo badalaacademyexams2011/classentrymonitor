@@ -169,9 +169,28 @@
     return res;
   }
 
+  /** Merges the server's saved entries for a date without replacing local unsynced edits. */
+  async function refreshEntries(date) {
+    const res = await api('entry_snapshot', { date: date });
+    if (!res || !res.ok) {
+      const error = res && res.error ? res.error : 'server';
+      throw new Error((res && res.detail) ? error + ': ' + res.detail : error);
+    }
+    const local = new Map((await entryAll()).map(function (e) { return [e.key, e]; }));
+    let updated = 0;
+    for (const remote of res.entries || []) {
+      const current = local.get(remote.key);
+      if (current && !current.synced) continue;
+      if (current && current.recordedAt && new Date(current.recordedAt) >= new Date(remote.recordedAt)) continue;
+      await entryPut(remote);
+      updated++;
+    }
+    return { updated: updated, serverNow: res.serverNow };
+  }
+
   g.Core = {
     metaGet: metaGet, metaSet: metaSet, metaDel: metaDel,
     entryPut: entryPut, entryAll: entryAll, entryDel: entryDel, prune: prune,
-    api: api, syncNow: syncNow, refreshConfig: refreshConfig,
+    api: api, syncNow: syncNow, refreshConfig: refreshConfig, refreshEntries: refreshEntries,
   };
 })(typeof self !== 'undefined' ? self : globalThis);
